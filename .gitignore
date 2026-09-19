@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Office temporary files
+~$*.xlsx
+~$*.docx
+~$*.pptx
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# Local tool configurations
+.claude/
+.firecrawl/
+
+# Secrets - never commit the API key
+.env
+
+# Data files - code only. Invoice data is sensitive, bulky, and re-downloadable.
+*.pdf
+*.csv
+*.xlsx
+*.xls
+*.zip
+*.txt

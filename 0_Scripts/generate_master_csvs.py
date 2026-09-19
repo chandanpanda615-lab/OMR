@@ -1,0 +1,126 @@
+"""Read Master_Entry.xlsx -> ONE combined Header CSV + Expenses CSV + Verification + one zip.
+
+Usage:
+    python generate_master_csvs.py
+    python generate_master_csvs.py --no-vendor-select      # omit the Vendor Select address column
+    python generate_master_csvs.py --skip=123,456          # External IDs already booked
+    python generate_master_csvs.py --selfcheck             # run the tax-math self-test only
+
+Each Entry row carries its Hub (last column); the hub's vendor/GSTIN/address config is read
+straight from build_entry_workbook.HUBS (no per-hub Config sheet needed). Tax type is derived
+per row by process_entry_row exactly as the per-hub generator does.
+
+Reads : <OUT_ROOT>\\Master_Entry.xlsx
+Writes: <OUT_ROOT>\\1_ALL_Bills_Header.csv, 2_ALL_Bills_Expenses.csv,
+        ALL_Tax_Verification.csv, ALL_Invoices.zip
+"""
+import csv, os, sys, zipfile
+from openpyxl import load_workbook
+from build_entry_workbook import HUBS, config_rows, OUT_ROOT, ENTRY_HEADERS
+from generate_import_csvs import HEADER_COLS, EXP_COLS, process_entry_row, fmt_date
+
+HUB_IDX = len(ENTRY_HEADERS)   # 0-based index of the Hub column (appended after N)
+
+
+def selfcheck():
+    # intra hub (OMR: POS 33, GSTIN 33) and IGST hub (Pondicherry: POS 34, GSTIN 33)
+    omr = dict(config_rows("omr"))
+    h, e, v, w = process_entry_row("T1", "13/09/2026", "HUL", "x.pdf", 1000, 1000, "", omr, "33")
+    assert not w and v[1] == "CGST+SGST" and v[5] == v[6] and str(v[5]) == "115.00", v
+    assert str(v[9]) == "2.00" and str(v[10]) == "2228.00", v        # TDS, NetPayable
+    assert len(e) == 2, e
+    pny = dict(config_rows("pondicherry"))
+    h, e, v, w = process_entry_row("T2", "13/09/2026", "HUL", "x.pdf", 1000, 1000, "", pny, "34")
+    assert v[1] == "IGST" and str(v[7]) == "230.00" and str(v[10]) == "2228.00", v
+    print("selfcheck OK")
+
+
+def main():
+    if "--selfcheck" in sys.argv:
+        selfcheck(); return
+    include_vs = "--no-vendor-select" not in sys.argv
+    skip = set()
+    for a in sys.argv:
+        if a.startswith("--skip="):
+            skip = {s.strip() for s in a.split("=", 1)[1].split(",") if s.strip()}
+
+    # per-Location config = the flat dict the old per-hub Config sheet used to hold
+    cfg_by_loc, pos_by_loc = {}, {}
+    for k in HUBS:
+        C = dict(config_rows(k))
+        loc = HUBS[k]["Location"]
+        cfg_by_loc[loc] = C
+        pos_by_loc[loc] = str(C["Place of Supply"]).split("-")[0].strip()
+
+    wb = load_workbook(os.path.join(OUT_ROOT, "Master_Entry.xlsx"), data_only=True)
+    header_rows, exp_rows, verify_rows, warnings = [], [], [], []
+    for r in wb["Entry"].iter_rows(min_row=2, values_only=True):
+        inv = r[0]
+        if inv is None:
+            continue
+        if str(inv) in skip:
+            continue
+        hub = str(r[HUB_IDX]).strip() if len(r) > HUB_IDX and r[HUB_IDX] else ""
+        if hub not in cfg_by_loc:
+            warnings.append(f"{inv}: unknown/blank Hub '{hub}' - row skipped")
+            continue
+        h, e, v, w = process_entry_row(inv, fmt_date(r[1]), r[2], r[3], r[4], r[5], r[6],
+                                       cfg_by_loc[hub], pos_by_loc[hub])
+        warnings += w
+        if h is None:
+            continue
+        header_rows.append(h); exp_rows += e; verify_rows.append(v)
+
+    assert header_rows, "No bills generated - did you fill amounts and save Master_Entry.xlsx?"
+
+    header_cols = list(HEADER_COLS)
+    if not include_vs:
+        header_cols.remove("Vendor Select")
+        for h in header_rows:
+            h.pop("Vendor Select", None)
+
+    h_path = os.path.join(OUT_ROOT, "1_ALL_Bills_Header.csv")
+    e_path = os.path.join(OUT_ROOT, "2_ALL_Bills_Expenses.csv")
+    v_path = os.path.join(OUT_ROOT, "ALL_Tax_Verification.csv")
+    with open(h_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=header_cols); w.writeheader(); w.writerows(header_rows)
+    with open(e_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=EXP_COLS); w.writeheader(); w.writerows(exp_rows)
+    with open(v_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["Invoice", "TaxType", "Taxable5%", "Taxable18%", "TotTaxable",
+                    "CGST", "SGST", "IGST", "TotGST", "TDS194Q", "NetPayable"])
+        for row in verify_rows:
+            w.writerow([row[0], row[1]] + [str(v) for v in row[2:]])
+
+    # Bundle every referenced PDF from all hubs' PDFs folders into one zip.
+    wanted = [h["Attached file"] for h in header_rows if h.get("Attached file")]
+    locs = {h["Location"] for h in header_rows}
+    found = {}
+    for loc in locs:
+        for dp, _, files in os.walk(os.path.join(OUT_ROOT, loc, "PDFs")):
+            for fn in files:
+                if fn in wanted and fn not in found:
+                    found[fn] = os.path.join(dp, fn)
+    z_path = os.path.join(OUT_ROOT, "ALL_Invoices.zip")
+    with zipfile.ZipFile(z_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for fn in wanted:
+            if fn in found:
+                z.write(found[fn], fn)
+    for fn in wanted:
+        if fn not in found:
+            warnings.append(f"PDF not found under any hub's PDFs folder: {fn}")
+
+    igst_n = sum(1 for v in verify_rows if v[1] == "IGST")
+    print(f"Header : {h_path}  ({len(header_rows)} bills)")
+    print(f"Expenses: {e_path}  ({len(exp_rows)} lines)")
+    print(f"Verify : {v_path}")
+    print(f"Zip : {z_path}  ({sum(1 for fn in wanted if fn in found)}/{len(wanted)} PDFs)")
+    print(f"Tax split: {len(verify_rows) - igst_n} intra (CGST+SGST), {igst_n} IGST")
+    print(f"Vendor Select (address): {'INCLUDED' if include_vs else 'OMITTED'}")
+    for w_ in warnings:
+        print("WARN:", w_)
+
+
+if __name__ == "__main__":
+    main()
