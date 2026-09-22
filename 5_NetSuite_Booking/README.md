@@ -14,11 +14,12 @@ exact names and location or the scripts break.
 │   └─ Booked\*.pdf           LIVE  auto-filled by mark_booked.py after import
 │                                   (created the first time that hub is marked)
 │   Hubs: Byrathi, Chrompet, Gouribidanur, Hosur, Mysore Road, OMR,
-│         PNCY, Pondicherry, Soukya, Tumkur, Yeshwantpura
+│         Pondicherry, Soukya, Tumkur, Yeshwantpura
 │
 ├─ Master_Entry.xlsx         LIVE  the day's entry sheet — you FILL the yellow
-│                                   cells (Amount_5%, Amount_18%, IGST?)
-├─ Master_Links.xlsx         LIVE  same row order — click column E to open each PDF
+│                                   cells (Amount_5%, Amount_18%, IGST?), or let
+│                                   fill_tax_from_pdfs.py fill them. Column D
+│                                   ("Attached file") is a click-to-open S3 PDF link.
 │
 │   generate_master_csvs.py writes these 4 (overwritten each day):
 ├─ 1_ALL_Bills_Header.csv    LIVE  NetSuite import — bill headers
@@ -29,38 +30,47 @@ exact names and location or the scripts break.
 ├─ _booked.csv               LIVE  the ONE dedup ledger — every booked invoice.
 │                                   Never delete. download + build scripts skip
 │                                   anything already in it.
-├─ _pending_not_booked.csv   LIVE  written by status.py
 ├─ STATUS.csv                LIVE  written by status.py (dashboard)
-├─ MISSING_PDFS.csv          LIVE  written by download_hul_pdfs.py — invoices with
-│                                   a blank S3 link (rewritten every download run)
-├─ Missing_PDF_Invoices_16-17Sep.csv   manual record of 24 no-link HUL SAMADHAN
-│                                        invoices (Chromepet + OMR) held out of booking
-│
-├─ CDMS_Sorted\              past one-off CDMS batch (self-contained: own CSVs + zip + PDFs)
+├─ MISSING_PDFS.xlsx         LIVE  the MISSING PDFs LIST (tab "Chase"): every invoice not booked yet +
+│                                   status / remark / bad_file / days_waiting. Rows are only added
+│                                   or updated; a row leaves only when the invoice is in _booked.csv.
+├─ CDMS_Recovered.csv        LIVE  links CDMS_Tool\download_invoices.py found for the Missing PDFs list;
+│                                   download + build read it, archive_batch.py archives it
+├─ Gemini\                   LIVE  every Gemini answer, kept forever (never delete - it is paid for)
+│   ├─ raw\<md5>.json               one file per PDF = exactly what Gemini read; reused, never re-paid
+│   └─ Gemini_Results.xlsx          those answers vs what went into the import files (SAME / DIFFERENT)
 └─ Archive\                  finished batches — nothing here is read by the scripts
     ├─ Combined_2026-09-17\
     ├─ Reimport_2026-09-18\
     ├─ OMR_2026-09-13\  OMR_Sep05-10_15bills\  Yeshwantpura_2026-09-15\
+    ├─ CDMS_Sorted_retired_2026-09-22\   the old separate CDMS batch (lane merged into the daily flow)
     └─ old_per_hub\<Hub>\   old per-hub-flow outputs (Entry.xlsx, per-hub CSVs,
                              source CSVs, per-hub zips) — superseded by the master flow
 ```
 
-## Daily workflow (master flow)
+## Daily workflow (one lane — CDMS recovery is part of it)
 
-1. `python download_hul_pdfs.py "path\to\GRN.csv"`
-   → PDFs land in `<Hub>\PDFs\<date>\`; blank-link rows go to `MISSING_PDFS.csv`.
-2. `python build_master_workbook.py "path\to\GRN.csv"`
-   → builds `Master_Entry.xlsx` + `Master_Links.xlsx`.
-   ⚠ This OVERWRITES `Master_Entry.xlsx`. Run it BEFORE you fill amounts, never after.
-3. Fill the yellow cells in `Master_Entry.xlsx` (use `Master_Links.xlsx` side-by-side
-   to open each PDF), save.
-4. `python generate_master_csvs.py`
-   → writes the 4 `ALL_*` import files above.
+(`RUN_DAY.bat "path\to\GRN.csv"` in `0_Scripts\` = steps 1 + 2.)
+1. `python download_hul_pdfs.py "path\to\GRN.csv"` → first re-checks the Missing PDFs list in CDMS
+   (only if `CDMS_Tool\token.txt` is still valid - refresh it by hand), then downloads GRN + CDMS-found
+   PDFs into `<Hub>\PDFs\<yyyy-mm-dd>\` and prints per hub: Downloaded now / Already on disk /
+   Booked (skip) / No link (list). No-link rows go on the Missing PDFs list.
+2. `python build_master_workbook.py "path\to\GRN.csv"` → ONE `Master_Entry.xlsx` (GRN + recovered),
+   pre-filled from saved Gemini answers. Refuses to overwrite a `Master_Entry.xlsx` that has amounts.
+3. In `Master_Entry.xlsx`, per row: type the amounts yourself, OR type `x` in `No Gemini`, OR type a
+   `Remark` if you can't book it (→ Missing PDFs list as "wrong file"). Then optionally
+   `python fill_tax_from_pdfs.py` - Gemini reads only the untouched rows; answers are saved in `Gemini\`
+   first. Unsure rows are red REVIEW with the printed tax shown - fill those by hand. Save.
+4. `python generate_master_csvs.py` → the 4 `ALL_*` import files. STOPS if a row's amounts don't match
+   the tax printed on its PDF. Updates the Missing PDFs list and `Gemini\Gemini_Results.xlsx`.
 5. In NetSuite: upload `ALL_Invoices.zip` to the File Cabinet **FIRST**, then
    Import CSV Records (header + expenses) with **RUN SERVER SUITESCRIPT ✔**.
 6. `python mark_booked.py`
-   → logs today's invoices in `_booked.csv` and MOVES their PDFs from
-   `<Hub>\PDFs\` to `<Hub>\Booked\`, so `PDFs\` only ever shows unbooked work.
+   → logs today's invoices in `_booked.csv`, MOVES their PDFs from `<Hub>\PDFs\` to
+   `<Hub>\Booked\`, and updates the Missing PDFs list (booked leave, not-booked join).
+7. `python archive_batch.py` → today's batch files (incl. `CDMS_Recovered.csv`) → `Archive\Master_<date>\`.
+
+Full step table: `0_Scripts\WORKFLOW.md`.
 
 ## Rules of thumb
 - Anything under `Archive\` is finished — safe to ignore, safe to delete.

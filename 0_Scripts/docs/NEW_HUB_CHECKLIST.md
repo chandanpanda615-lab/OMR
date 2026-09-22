@@ -60,6 +60,7 @@ python build_entry_workbook.py <Hub>
 **3. Fill the Excel**  → `5_NetSuite_Booking\<Hub>\<Hub>_Entry.xlsx`
 - Yellow cells only: **Amount_5%**, **Amount_18%**, **IGST?** (blank unless the invoice shows IGST)
 - Cross-check the live **CGST 2.5% / SGST 2.5% / CGST 9% / SGST 9%** columns against each invoice's tax lines → **save**
+- Gemini auto-fill (`fill_tax_from_pdfs.py`) applies to the Master flow, not this per-hub checklist — see WORKFLOW.md.
 
 **4. Make the import files**
 ```

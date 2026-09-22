@@ -14,37 +14,67 @@ Human enters only the 5% / 18% taxable amounts; everything else is automated.
   - `1_ALL_Bills_Header.csv`, `2_ALL_Bills_Expenses.csv` – combined import files
   - `ALL_Tax_Verification.csv`, `ALL_Invoices.zip` – tax check + PDFs bundled for File Cabinet
   - `_booked.csv`   – ledger of every invoice already imported (never re-listed)
+  - `MISSING_PDFS.xlsx` – the **Missing PDFs list** (tab `Chase`): every invoice not booked yet + why
+  - `Gemini/raw/*.json` – every Gemini answer, one file per PDF (never paid twice);
+    `Gemini/Gemini_Results.xlsx` – those answers vs what went into the import files
+  - `CDMS_Recovered.csv` – PDFs CDMS found for the Missing PDFs list today (read by steps 1–2, archived in step 7)
   - `<Location>/PDFs/<date>/`   – signed invoice PDFs;  `<Location>/Booked/` – PDFs after import
   - `Archive/<Hub>_<date>/`     – move a batch here once imported
   - Per-hub files (`<Location>/<Location>_Entry.xlsx`, `1_<HUB>_...csv`) – only if you use the per-hub alternative
 
 ## Steps — Master flow (run from `0_Scripts/`, one file for every hub)
-1. **Download PDFs**  (HUL + HUL SAMADHAN only) — *you already did this*
+> **Steps 1–2 in one go:** `RUN_DAY.bat "C:\path\to\grn_copy_upload_data.csv"`
+> Every step prints plain counts and updates the **Missing PDFs list** (`MISSING_PDFS.xlsx`).
+
+1. **Download PDFs** (HUL + HUL SAMADHAN only)
    `python download_hul_pdfs.py "C:\path\to\grn_copy_upload_data.csv"`
-   → PDFs land in `5_NetSuite_Booking\<Location>\PDFs\<date>\`. Already-booked invoices are skipped.
+   - **CDMS check first**, if `CDMS_Tool\token.txt` is still valid (refresh it by hand — see
+     `CDMS_Tool\HOW_TO_RUN.txt`): every invoice on the Missing PDFs list is looked up in CDMS; PDFs
+     found are downloaded in this same step. Token expired → "CDMS check SKIPPED", the rest still runs.
+   - Prints a per-hub table:
+     | Column | Meaning |
+     |---|---|
+     | **Downloaded now** | new PDF saved today into `<Hub>\PDFs\<yyyy-mm-dd>\` |
+     | **Already on disk** | PDF was downloaded in an earlier run — not downloaded again (nothing lost) |
+     | **Booked (skip)** | invoice is already in NetSuite (`_booked.csv`) — ignored |
+     | **No link (list)** | GRN has no PDF link yet — put on the Missing PDFs list |
 2. **Build the master report**
-   `python build_master_workbook.py "C:\path\to\grn_copy_upload_data.csv"`  (no path = uses the default GRN CSV)
-   → writes `5_NetSuite_Booking\Master_Entry.xlsx` (the master report). Each row's **Attached file**
-     cell links straight to its S3 PDF — click it to open, no separate links workbook.
-     Already-booked invoices are skipped; invoices whose PDF link is missing are reported, not listed.
-     An **About** sheet stamps the build date, the source CSV path, and the counts —
-     so an old file opened later can explain which day / which CSV it came from.
-3. **Fill amounts.** Open `Master_Entry.xlsx`, fill the YELLOW cells (`Amount_5%`, `Amount_18%`,
-   and `IGST?` only for a rare inter-state row), save. Click a row's **Attached file** cell to open its
-   PDF and read the taxable amounts. **Can't book a row** (wrong PDF / bad details)? Leave its amounts
-   blank and type a reason in the **`Remark`** column (last column) — e.g. `wrong file`. Step 6
-   collects every not-booked row + its remark into `MISSING_PDFS.xlsx` for you to chase.
+   `python build_master_workbook.py "C:\path\to\grn_copy_upload_data.csv"`
+   → `5_NetSuite_Booking\Master_Entry.xlsx`: today's GRN rows + CDMS-recovered rows. Each row's
+     **Attached file** cell links to its S3 PDF (opens in the browser). Rows whose PDF Gemini already
+     read are **pre-filled from the saved answer** (free). Prints what was listed and what was not
+     (already booked / no link / same wrong PDF / unknown hub — the last three are on the Missing PDFs list).
+     An unknown hub name is printed as **UNKNOWN HUB** (add it to `ALIASES`/`HUBS` in `build_entry_workbook.py`).
+     Refuses to overwrite a `Master_Entry.xlsx` that already has amounts (finish that batch first).
+3. **Fill amounts — you choose, row by row.** Open `Master_Entry.xlsx`:
+   - **type it yourself:** fill the YELLOW `Amount_5%` / `Amount_18%` (and `IGST?` for a rare inter-state row);
+   - **no Gemini for this row:** type `x` in **`No Gemini (type x)`** (e.g. for the 5–6 you want to do by hand);
+   - **can't book it** (wrong PDF / bad details): leave amounts blank, type a reason in **`Remark`** →
+     it goes on the Missing PDFs list as "wrong file" and that same PDF is never listed again.
+     A pre-filled "VERIFY" remark = this invoice had a wrong PDF before: check the new one: correct -> type the amounts (booked); still wrong -> type your own remark. Left untouched = listed again next day.
+   - then, for all other rows, optionally: `python fill_tax_from_pdfs.py` (Gemini, needs `GEMINI_API_KEY`).
+     It **never touches** a row you typed or marked `x`. Every answer is saved first in
+     `5_NetSuite_Booking\Gemini\raw\` (one file per PDF) and the Master is filled from there — the same
+     PDF is never paid for twice. A row is filled only when the tax matches the printed tax (±₹1);
+     otherwise it is red **REVIEW** with the printed tax in **`Printed Tax (Gemini)`** — fill those by hand.
+   - Save.
 4. **Generate the combined import files**
    `python generate_master_csvs.py`                     (address label included)
    `python generate_master_csvs.py --no-vendor-select`  (omit address)
-   → `1_ALL_Bills_Header.csv`, `2_ALL_Bills_Expenses.csv`, `ALL_Tax_Verification.csv` (check the tax math),
-     `ALL_Invoices.zip` (every referenced PDF).  Tax-math self-test: `python generate_master_csvs.py --selfcheck`.
+   → `1_ALL_Bills_Header.csv`, `2_ALL_Bills_Expenses.csv`, `ALL_Tax_Verification.csv`, `ALL_Invoices.zip`.
+   **Money check:** if a row's amounts don't match the tax printed on its PDF (`Printed Tax (Gemini)`,
+   more than ₹1 off), it STOPS and writes nothing — fix those rows. Only if you checked the PDF and
+   Gemini misread the printed tax: `--accept=<invoice>,<invoice>`.
+   Also updates the Missing PDFs list (rows left out of this batch) and
+   `5_NetSuite_Booking\Gemini\Gemini_Results.xlsx` (every Gemini answer vs what went into the import).
+   Tax-math self-test: `python generate_master_csvs.py --selfcheck`.
 5. **Import to NetSuite** (browser — see below), using the `ALL_` files + `ALL_Invoices.zip`.
 6. **Mark booked** — only after a successful import
-   `python mark_booked.py`  → appends every External ID to `_booked.csv` and moves each booked PDF
-   from `<hub>\PDFs\` to `<hub>\Booked\`. Run it twice → 0 rows added (dedupe check).
+   `python mark_booked.py`  → appends every External ID to `_booked.csv`, moves each booked PDF
+   from `<hub>\PDFs\` to `<hub>\Booked\`, and updates the Missing PDFs list (booked leave it, not-booked
+   rows join it). Run it twice → 0 rows added (dedupe check).
 7. **Archive the batch** — clears the top level for the next day
-   `python archive_batch.py`  → moves the 6 batch files (`Master_*.xlsx`, `*ALL_*`) into
+   `python archive_batch.py`  → moves the batch files (`Master_*.xlsx`, `*ALL_*`, `CDMS_Recovered.csv`) into
    `5_NetSuite_Booking\Archive\Master_<today>\` (date auto-filled; pass a date to override).
    `_booked.csv` and the hubs' `Booked\` PDFs stay put.
 
@@ -63,46 +93,24 @@ Human enters only the 5% / 18% taxable amounts; everything else is automated.
    Custom Form = `Ripplr Vendor Bill`.
 4. Save & Run.  Then `python mark_booked.py`.
 
-## Missing / wrong-file invoices → chase from the CDMS portal
-Missing invoices collect in **`5_NetSuite_Booking\MISSING_PDFS.xlsx`** (two tabs):
-- **`Missing_Links`** — written by `download_hul_pdfs.py`: invoices whose S3 link was blank.
-- **`Wrong_File_Chase`** — written by `mark_booked.py` / `cdms_mark_booked.py`: rows listed in an entry
-  workbook but not booked, with the `Remark` you typed (e.g. `wrong file`).
+## The Missing PDFs list — missing / wrong-file invoices (`5_NetSuite_Booking\MISSING_PDFS.xlsx`, tab `Chase`)
+One row per invoice that is not booked yet, with `status`, your `remark`, the `bad_file` (the PDF
+that was wrong), `first_seen` and `days_waiting`. Rows are only added or updated — no script wipes
+another script's rows — and a row leaves the list only when the invoice is in `_booked.csv`.
+| Status | Written by | What to do |
+|---|---|---|
+| `no S3 link (GRN)` | `download_hul_pdfs.py` | nothing — step 1 re-checks CDMS (when the token is valid) |
+| `CDMS: PDF not attached yet` | `download_invoices.py` | ask the hub to upload the signed invoice |
+| `CDMS: not found in portal` | `download_invoices.py` | check the invoice number |
+| `wrong file …` / `CDMS: still the same wrong file` | `mark_booked.py` / `download_invoices.py` | ask the hub to re-upload the right PDF |
+| `CDMS: PDF found …` | `download_invoices.py` | nothing — it is in the next `Master_Entry.xlsx` |
+| `left blank in Master_Entry` | `mark_booked.py` | nothing — listed again next day |
+| `unknown hub '…'` | `build_master_workbook.py` | add the spelling to `ALIASES` (or a new hub to `HUBS`) in `build_entry_workbook.py` |
 
-To pull those PDFs from CDMS (folder `0_Scripts\CDMS_Tool\`, full guide in its `HOW_TO_RUN.txt`):
-1. Copy the `invoice_no` column from either tab into `CDMS_Tool\invoices.txt` (one per line).
-2. Refresh the login token: Chrome ▸ CDMS GRN page ▸ F12 ▸ Network ▸ Fetch/XHR ▸ search an invoice ▸
-   click the `list` request ▸ Request Headers ▸ copy the `authorization` value ▸ paste into `CDMS_Tool\token.txt`.
-   (Token expires every 24 h; the script strips a leading `Bearer `.)
-3. `cd CDMS_Tool` then `python download_invoices.py` (or double-click `run.bat`).
-   → PDFs to `Desktop\CDMS_Invoices`, status report to `Desktop\CDMS_PDF_Result.xlsx`
-   (`Downloaded` / `PDF Not attached` / `Not found`).
-
-## Booking the CDMS-recovered invoices (a SEPARATE batch, kept in `CDMS_Sorted\`)
-These are a different problem from the daily GRN flow, so they get their own entry workbook and
-never mix with the top-level Master flow. Same columns as `Master_Entry.xlsx` (+ `Remark`), so
-booking is identical. **The tracker only changes after NetSuite accepts** — mirrors the daily flow.
-1. `python build_cdms_entry.py` → `CDMS_Sorted\CDMS_Entry.xlsx`, one row per **downloaded** invoice;
-   moves each PDF off the Desktop into `CDMS_Sorted\<Hub>\PDFs\<date>\` (kept for the import zip). Each
-   row's **Attached file** cell links to the **S3 URL** (opens in the browser, not Adobe). Ones that had
-   a wrong PDF before are pre-flagged in `Remark` (VERIFY them).
-2. Work `CDMS_Entry.xlsx`: **good** → fill `Amount_5%`/`Amount_18%`; **wrong/unusable** → type a
-   `Remark` (e.g. `wrong file`), leave amounts blank. Click a row's **Attached file** cell to open its PDF.
-3. `python cdms_generate.py` → `CDMS_Sorted\1_CDMS_Bills_Header.csv` + expenses + verification + zip.
-   **Changes no tracker** — safe to re-run after a NetSuite rejection.
-4. Import to NetSuite (same browser steps, `CDMS_` files + `CDMS_Invoices.zip`).
-5. **Only after NetSuite accepts:** `python cdms_mark_booked.py` → books them in `_booked.csv`,
-   moves their PDFs `CDMS_Sorted\<Hub>\PDFs\` → `<Hub>\Booked\`, drops them from `Missing_Links`,
-   and sends any `Remark`-only rows to `Wrong_File_Chase`.
-6. **Archive the CDMS batch** — `python archive_cdms.py` → moves that run's `CDMS_Entry.xlsx` +
-   `1_CDMS_*` / `2_CDMS_*` / `CDMS_Tax_Verification.csv` / `CDMS_Invoices.zip` into
-   `CDMS_Sorted\Archive\CDMS_<today>\` (date auto-filled), keeping a clean per-run record.
-
-## Filing CDMS PDFs back into the hubs
-`python sort_cdms.py`  → dry-run plan;  `python sort_cdms.py --go` → move.
-Files `CDMS_Sorted\<Hub>\PDFs\<date>\*.pdf` into the real hub folders: booked → `<Hub>\Booked\`,
-not-yet-booked → `<Hub>\PDFs\<date>\` (skips files already there). Maps `Mysore`→`Mysore Road`,
-`YPR`→`Yeshwantpura`.
+CDMS check on its own / only some invoices: `python CDMS_Tool\download_invoices.py [9633128587 ...]`.
+The old separate CDMS batch (`CDMS_Sorted\`, `build_cdms_entry` / `cdms_generate` / `cdms_mark_booked` /
+`archive_cdms` / `sort_cdms`) was retired on 2026-09-22: scripts in `_legacy_cdms\`, data in
+`5_NetSuite_Booking\Archive\CDMS_Sorted_retired_2026-09-22\`.
 
 ## Notes
 - Check what's downloaded and what's booked: `python status.py` (or `python status.py <Hub>`) → per-hub

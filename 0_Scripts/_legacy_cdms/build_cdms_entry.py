@@ -6,12 +6,12 @@ Master flow. Same columns as the normal Master_Entry (so booking works identical
 Remark column: fill amounts to book, or type a reason (e.g. "wrong file") to send the row
 to MISSING_PDFS.xlsx -> Wrong_File_Chase later (see cdms_finalize.py).
 
-    python build_cdms_entry.py            # reads Desktop\\CDMS_PDF_Result.xlsx + Desktop\\CDMS_Invoices
+    python build_cdms_entry.py            # reads CDMS_Sorted\\_Download\\CDMS_PDF_Result.xlsx + CDMS_Invoices
 
 Writes into 5_NetSuite_Booking\\CDMS_Sorted\\:
-    CDMS_Entry.xlsx   - one row per downloaded invoice (YELLOW = fill; Remark = flag)
-    CDMS_Links.xlsx   - same rows, click-to-open link to each LOCAL pdf
-And MOVES each downloaded PDF from the Desktop into CDMS_Sorted\\<Hub>\\PDFs\\<date>\\.
+    CDMS_Entry.xlsx   - one row per downloaded invoice (YELLOW = fill; Remark = flag;
+                        column D = click-to-open S3 PDF link)
+And MOVES each downloaded PDF from CDMS_Sorted\\_Download\\CDMS_Invoices into CDMS_Sorted\\<Hub>\\PDFs\\<date>\\.
 'PDF Not attached' invoices are skipped here (they stay in MISSING_PDFS.xlsx Missing_Links).
 """
 import os, shutil, sys
@@ -21,11 +21,11 @@ from build_entry_workbook import (HUBS, ENTRY_HEADERS, ENTRY_WIDTHS, add_entry_r
 
 LINK = Font(color="0563C1", underline="single")   # the Attached file cell doubles as the PDF link
 
-DESKTOP = os.path.join(os.path.expanduser("~"), "Desktop")
-RESULT = os.path.join(DESKTOP, "CDMS_PDF_Result.xlsx")
-SRC_PDFS = os.path.join(DESKTOP, "CDMS_Invoices")
 OUT_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "5_NetSuite_Booking")
 CDMS_ROOT = os.path.join(OUT_ROOT, "CDMS_Sorted")
+DL_ROOT = os.path.join(CDMS_ROOT, "_Download")   # where CDMS_Tool\download_invoices.py writes
+RESULT = os.path.join(DL_ROOT, "CDMS_PDF_Result.xlsx")
+SRC_PDFS = os.path.join(DL_ROOT, "CDMS_Invoices")
 MISSING_XLSX = os.path.join(OUT_ROOT, "MISSING_PDFS.xlsx")
 
 VALID = {HUBS[k]["Location"] for k in HUBS}
@@ -72,7 +72,7 @@ def main():
             continue
         iso = str(r[4])[:10]
         fn = (r[6] or "").strip()
-        # move the PDF off the Desktop into the quarantined CDMS_Sorted area
+        # move the PDF from _Download into its hub folder
         dest_dir = os.path.join(CDMS_ROOT, hub, "PDFs", iso)
         dest = os.path.join(dest_dir, fn)
         src = os.path.join(SRC_PDFS, fn)
@@ -89,7 +89,7 @@ def main():
         per_hub[hub] = per_hub.get(hub, 0) + 1
 
     if not per_hub:
-        sys.exit("Nothing downloaded to enter (no 'Downloaded' rows in CDMS_PDF_Result.xlsx).")
+        sys.exit(f"Nothing downloaded to enter (no 'Downloaded' rows in {RESULT}).")
 
     for i, w in enumerate(ENTRY_WIDTHS + [16, 40], start=1):   # Hub 16, Remark 40
         ent.column_dimensions[ent.cell(1, i).column_letter].width = w

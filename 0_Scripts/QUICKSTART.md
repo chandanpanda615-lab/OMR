@@ -28,6 +28,8 @@ Then open `..\5_NetSuite_Booking\<Hub>_Entry.xlsx`, go to step **C**.
   match each against the invoice's tax lines. If they match, the amounts are right.
 - **Save** the file.
 
+> Gemini auto-fill (`fill_tax_from_pdfs.py`) applies to the **Master** flow, not this per-hub quickstart — see **WORKFLOW.md**.
+
 ## D. Make the import files (CSVs + PDF zip)
 ```
 python generate_import_csvs.py <Hub>

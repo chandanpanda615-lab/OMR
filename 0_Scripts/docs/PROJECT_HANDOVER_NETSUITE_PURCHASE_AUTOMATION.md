@@ -225,7 +225,7 @@ The user has highlighted the next 12 unbilled invoices for OMR:
 
 ### Execution Runbook for the Next Agent:
 1. **Download & Zip:** Execute the Python S3 retrieval script above to save all 12 PDFs into `C:\Users\chandan.p\Desktop\OMR\Batch_9th_10th\PDFs` and zip them to `12_OMR_Invoices_9th_10th.zip`.
-2. **Pre-populate Entry Workbook:** Generate `OMR_Entry_9th_10th.xlsx` with pre-filled headers, locations, and PDF filenames so the user only enters 5% / 18% amounts (or OCR if enabled).
+2. **Pre-populate Entry Workbook:** Generate `OMR_Entry_9th_10th.xlsx` with pre-filled headers, locations, and PDF filenames so the user only enters 5% / 18% amounts — manually, or via the optional `fill_tax_from_pdfs.py` auto-fill (needs `GEMINI_API_KEY`; unverified rows are left red REVIEW for manual entry).
 3. **Generate Import CSVs:** Run the generator script to create `1_OMR_9th_10th_Header.csv` and `2_OMR_9th_10th_Expenses.csv`.
 4. **NetSuite Upload:**
    * User uploads `12_OMR_Invoices_9th_10th.zip` to NetSuite File Cabinet (`Ganesh Folder`) via Advanced Add.

@@ -10,7 +10,9 @@ download_hul_pdfs.py and download_from_links.py all read this ledger and skip
 anything already in it.
 
 MASTER mode also MOVES each booked PDF from <hub>\\PDFs\\... to <hub>\\Booked\\...,
-so the PDFs folder always shows only invoices still waiting to be booked.
+so the PDFs folder always shows only invoices still waiting to be booked, and updates the
+chase list (MISSING_PDFS.xlsx): booked invoices leave it, listed-but-not-booked rows join it
+(Remark typed -> "wrong file", that PDF remembered so it is never listed again).
 
 Self-check: run it twice -> the second run reports every invoice as "already in
 ledger" and adds 0 rows. That is the dedupe test, on real data.
@@ -31,25 +33,35 @@ def load_booked():
     return booked
 
 
-def chase_rows(entry_path, booked):
-    """Rows in Master_Entry that are NOT in the booked set (listed but skipped),
-    each with its typed Remark -> the wrong-file / to-chase list. Deduped by invoice."""
+def chase_not_booked(entry_path, done, chase):
+    """Every Master_Entry row NOT in `done` goes on the chase list: with a Remark -> "wrong file"
+    (its PDF remembered as bad_file, so the same file is never listed again); without -> "left blank"
+    (+ Gemini's note, e.g. "not printed in PDF - wrong file?"). Returns how many rows were chased."""
     from openpyxl import load_workbook
-    from build_entry_workbook import ENTRY_HEADERS
-    hub_i, rem_i = len(ENTRY_HEADERS), len(ENTRY_HEADERS) + 1   # 0-based Hub, Remark columns
-    rows, seen = [], set()
-    for r in load_workbook(entry_path, data_only=True)["Entry"].iter_rows(min_row=2, values_only=True):
-        inv = r[0]
-        if inv is None:
+    import missing_tracker as mt
+    it = load_workbook(entry_path, read_only=True, data_only=True)["Entry"].iter_rows(values_only=True)
+    col = {str(h): i for i, h in enumerate(next(it)) if h}
+
+    def get(r, name):
+        i = col.get(name)
+        return "" if i is None or i >= len(r) or r[i] is None else str(r[i]).strip()
+
+    n = 0
+    for r in it:
+        inv = get(r, "External ID")
+        if not inv or inv in done:
             continue
-        inv = str(inv).strip()
-        if inv in booked or inv in seen:
-            continue
-        seen.add(inv)
-        hub = str(r[hub_i]).strip() if len(r) > hub_i and r[hub_i] else ""
-        remark = str(r[rem_i]).strip() if len(r) > rem_i and r[rem_i] else ""
-        rows.append([inv, hub, r[1] if r[1] is not None else "", remark])
-    return rows
+        common = dict(hub=get(r, "Hub"), brand=get(r, "Brand"), invoice_date=r[1])
+        if get(r, "Remark") and get(r, "Remark") != mt.VERIFY:   # untouched VERIFY = not checked yet
+            mt.upsert(chase, inv, status="wrong file - ask hub to re-upload in CDMS",
+                      remark=get(r, "Remark"), bad_file=get(r, "Attached file"), **common)
+        else:
+            note = get(r, "Gemini note")
+            mt.upsert(chase, inv, status="left blank in Master_Entry - not booked"
+                      + (" (new PDF not checked yet)" if get(r, "Remark") else "")
+                      + (f" (Gemini: {note})" if note else ""), **common)
+        n += 1
+    return n
 
 
 def move_to_booked(hub, fn):
@@ -72,6 +84,9 @@ def move_to_booked(hub, fn):
 def main():
     hubs = [a for a in sys.argv[1:] if not a.startswith("-")]
     master = not hubs                    # no hub names -> master (ALL) flow
+    if master:
+        import missing_tracker
+        missing_tracker.assert_writable()   # stop before the ledger is touched, not half-way
     booked = load_booked()
     new_rows, already, moved, no_pdf = [], 0, 0, 0
     today = date.today().isoformat()
@@ -116,15 +131,13 @@ def main():
         print(f"PDFs moved to Booked: {moved}   (PDF not found on disk: {no_pdf})")
     print(f"Ledger: {LEDGER}  (total {len(booked)} invoices)")
 
-    if master:   # refresh the to-chase list from whatever is listed but still not booked
+    if master:   # booked rows leave the chase list; listed-but-not-booked rows join it
+        import missing_tracker as mt
+        chase = mt.load()
         entry_path = os.path.join(OUT_ROOT, "Master_Entry.xlsx")
-        if os.path.exists(entry_path):
-            from missing_tracker import write_sheet
-            rows = chase_rows(entry_path, booked)
-            write_sheet("Wrong_File_Chase",
-                        ["invoice_no", "hub", "invoice_date", "remark"], rows,
-                        widths=[14, 16, 12, 30])
-            print(f"To chase (listed but not booked): {len(rows)} -> MISSING_PDFS.xlsx (Wrong_File_Chase tab)")
+        n = chase_not_booked(entry_path, booked, chase) if os.path.exists(entry_path) else 0
+        path, left = mt.save(chase)
+        print(f"Listed but not booked: {n} -> Missing PDFs list  |  now {left} open: {path}")
 
 
 if __name__ == "__main__":

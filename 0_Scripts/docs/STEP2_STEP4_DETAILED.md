@@ -35,6 +35,8 @@ Do NOT run build directly. Use the paste tool — it does step 1 **and** step 2 
   If Step 4 later gives a *permission* error, close Excel and re-run.
 - Then go to STEP 4.
 
+> Gemini auto-fill (`fill_tax_from_pdfs.py`) applies to the **Master** flow, not this per-hub path — see **WORKFLOW.md**.
+
 ---
 
 ## STEP 4 — generate the import files

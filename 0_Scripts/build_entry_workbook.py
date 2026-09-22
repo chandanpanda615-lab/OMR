@@ -119,6 +119,15 @@ HUBS = {
     },
 }
 
+# Other spellings of a hub seen in the GRN CSV / CDMS portal -> HUBS key. Every script resolves
+# fc_name through hub_key(), so a new spelling is fixed here once ("Chromepet" was silently dropped).
+ALIASES = {"chromepet": "chrompet", "mysore": "mysore road", "ypr": "yeshwantpura"}
+
+
+def hub_key(name):
+    k = (name or "").strip().lower()
+    return ALIASES.get(k, k)
+
 
 def to_ddmmyyyy(iso):  # 2026-09-13 -> 13/09/2026
     p = (iso or "").split("-")
@@ -147,6 +156,12 @@ ENTRY_HEADERS = ["External ID", "Invoice Date", "Brand", "Attached file",
                  "CGST 2.5%", "SGST 2.5%", "CGST 9%", "SGST 9%", "IGST",
                  "Total GST", "Grand Total (Taxable+GST)"]
 ENTRY_WIDTHS = [15, 12, 13, 42, 12, 12, 13, 11, 11, 11, 11, 11, 11, 20]
+# Master_Entry columns after N. Hub must stay first (generate/mark_booked read it by position);
+# the rest are looked up by NAME. "No Gemini": type x -> fill_tax_from_pdfs never reads that row.
+NO_GEMINI, PRINTED_TAX, GEMINI_CHECK, GEMINI_NOTE = ("No Gemini (type x)", "Printed Tax (Gemini)",
+                                                     "Gemini Check", "Gemini note")
+MASTER_EXTRA = ["Hub", "Remark", NO_GEMINI, PRINTED_TAX, GEMINI_CHECK, GEMINI_NOTE]
+MASTER_EXTRA_WIDTHS = [16, 30, 11, 14, 12, 60]
 
 
 def add_entry_row(ws, inv, idate, brand, pdf, igst_editable):
@@ -185,7 +200,7 @@ def main():
         for r in csv.DictReader(f):
             if (r.get("brand_name") or "").strip().upper() not in BRANDS:
                 continue
-            if (r.get("fc_name") or "").strip().lower() != hub:
+            if hub_key(r.get("fc_name")) != hub:
                 continue
             if not (r.get("s3_file_link") or "").strip().startswith("https://cdms-signed-invoice.s3"):
                 continue
