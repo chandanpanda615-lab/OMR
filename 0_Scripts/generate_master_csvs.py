@@ -11,6 +11,8 @@ MONEY CHECK: when Gemini read a row's printed total tax ("Printed Tax (Gemini)" 
 amounts in E/F give a different tax (more than Rs 1 off), NOTHING is written - fix those rows
 first. (On 21-Sep four bills were booked with only the 5% amount this way.) If you checked the PDF
 and Gemini's printed-tax read is the wrong one, pass --accept=<invoice>.
+QR CHECK (same stop, same --accept): your taxable + tax must equal the e-invoice "QR Total" within
+Rs 1, and a row whose QR Check says WRONG FILE must not have amounts.
 Also refreshes the Missing PDFs list (rows left out of this batch) and Gemini\\Gemini_Results.xlsx.
 
 Each Entry row carries its Hub (last column); the hub's vendor/GSTIN/address config is read
@@ -23,7 +25,7 @@ Writes: <OUT_ROOT>\\1_ALL_Bills_Header.csv, 2_ALL_Bills_Expenses.csv,
 """
 import csv, os, sys, zipfile
 from openpyxl import load_workbook
-from build_entry_workbook import HUBS, config_rows, OUT_ROOT, ENTRY_HEADERS, PRINTED_TAX, QR_CHECK
+from build_entry_workbook import HUBS, config_rows, OUT_ROOT, ENTRY_HEADERS, PRINTED_TAX, QR_CHECK, QR_TOTAL
 from generate_import_csvs import HEADER_COLS, EXP_COLS, process_entry_row, fmt_date
 import missing_tracker as mt
 
@@ -40,6 +42,17 @@ def tax_gap(a5, a18, printed):
         return None
 
 
+def qr_total_gap(a5, a18, qr_total):
+    """Your taxable + tax minus the e-invoice QR total, or None when there is nothing to compare."""
+    if not isinstance(qr_total, (int, float)) or (a5 in (None, "") and a18 in (None, "")):
+        return None
+    try:
+        a5, a18 = float(a5 or 0), float(a18 or 0)
+    except (TypeError, ValueError):
+        return None
+    return round(a5 + a18 + round(a5 * 0.05 + a18 * 0.18, 2) - qr_total, 2)
+
+
 def selfcheck():
     # intra hub (OMR: POS 33, GSTIN 33) and IGST hub (Pondicherry: POS 34, GSTIN 33)
     omr = dict(config_rows("omr"))
@@ -54,6 +67,10 @@ def selfcheck():
     assert tax_gap(102673.35, None, 175704.24) == -170570.57
     assert abs(tax_gap(151255.70, 0, 7562.84)) <= 1
     assert tax_gap(1000, 0, None) is None and tax_gap(None, None, 50.0) is None
+    # QR check: real 9629078879 (Tumkur), QR total 5,35,184.89; a typo of Rs 4 in the 5% amount is caught
+    assert abs(qr_total_gap(57043.02, 402787.93, 535184.89)) <= 1
+    assert abs(qr_total_gap(57047.02, 402787.93, 535184.89)) > 1
+    assert qr_total_gap(1000, 0, None) is None and qr_total_gap(None, "", 5.0) is None
     print("selfcheck OK")
 
 
@@ -82,6 +99,7 @@ def main():
     hdr = [c.value for c in wb["Entry"][1]]
     p_idx = hdr.index(PRINTED_TAX) if PRINTED_TAX in hdr else None
     q_idx = hdr.index(QR_CHECK) if QR_CHECK in hdr else None
+    qt_idx = hdr.index(QR_TOTAL) if QR_TOTAL in hdr else None
     header_rows, exp_rows, verify_rows, warnings, blocked = [], [], [], [], []
     for r in wb["Entry"].iter_rows(min_row=2, values_only=True):
         inv = r[0]
@@ -94,6 +112,12 @@ def main():
                 and str(inv).strip() not in accept):
             blocked.append(f"  {inv}  ({r[HUB_IDX] if len(r) > HUB_IDX else ''}): amounts typed, but the QR says "
                            f"{qr} - this PDF is another invoice")
+            continue
+        qt = r[qt_idx] if qt_idx is not None and len(r) > qt_idx else None
+        qgap = qr_total_gap(r[4], r[5], qt)
+        if qgap is not None and abs(qgap) > 1 and str(inv).strip() not in accept:
+            blocked.append(f"  {inv}  ({r[HUB_IDX] if len(r) > HUB_IDX else ''}): your taxable + tax is "
+                           f"{qt + qgap:,.2f} but the QR total is {qt:,.2f}  (off by {qgap:,.2f})")
             continue
         gap = tax_gap(r[4], r[5], r[p_idx]) if p_idx is not None and len(r) > p_idx else None
         if gap is not None and abs(gap) > 1 and str(inv).strip() not in accept:
@@ -179,7 +203,7 @@ def main():
     print(f"  Verify  : {v_path}   Tax split: {len(verify_rows) - igst_n} CGST+SGST, {igst_n} IGST")
     print(f"  Zip     : {z_path}  ({sum(1 for fn in wanted if fn in found)}/{len(wanted)} PDFs)")
     print(f"  Vendor Select (address): {'INCLUDED' if include_vs else 'OMITTED'}")
-    print(f"  Printed-tax check: every row with a Gemini printed tax matches (accepted by you: {len(accept)})")
+    print(f"  Printed-tax + QR check: every row with a Gemini printed tax / QR total matches (accepted by you: {len(accept)})")
     print(f"  Left out of this batch: {left_out} -> Missing PDFs list ({open_n} open): {chase_path}")
     if view:
         print(f"  Gemini answers vs entered: {view}")

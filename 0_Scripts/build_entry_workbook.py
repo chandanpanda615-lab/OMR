@@ -161,8 +161,11 @@ ENTRY_WIDTHS = [15, 12, 13, 42, 12, 12, 13, 11, 11, 11, 11, 11, 11, 20]
 NO_GEMINI, PRINTED_TAX, GEMINI_CHECK, GEMINI_NOTE = ("No Gemini (type x)", "Printed Tax (Gemini)",
                                                      "Gemini Check", "Gemini note")
 QR_CHECK = "QR Check"   # OK / WRONG FILE - ... / NO QR, from the e-invoice QR (fill_tax_from_pdfs)
-MASTER_EXTRA = ["Hub", "Remark", NO_GEMINI, PRINTED_TAX, GEMINI_CHECK, GEMINI_NOTE, QR_CHECK]
-MASTER_EXTRA_WIDTHS = [16, 30, 11, 14, 12, 60, 40]
+# 3-way match of taxable + tax: your entry (column N) vs the QR total vs what Gemini read
+QR_TOTAL, GEMINI_TOTAL, MATCH_3WAY = "QR Total (taxable+tax)", "Gemini Total (taxable+tax)", "3-Way Match"
+MASTER_EXTRA = ["Hub", "Remark", NO_GEMINI, PRINTED_TAX, GEMINI_CHECK, GEMINI_NOTE, QR_CHECK,
+                QR_TOTAL, GEMINI_TOTAL, MATCH_3WAY]
+MASTER_EXTRA_WIDTHS = [16, 30, 11, 14, 12, 60, 40, 15, 15, 20]
 
 
 def add_entry_row(ws, inv, idate, brand, pdf, igst_editable):

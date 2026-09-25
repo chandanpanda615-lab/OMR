@@ -22,6 +22,8 @@ E-INVOICE QR (read locally, free, saved in Gemini\\qr\\<md5>.json), checked on E
     QR is another invoice   -> "WRONG FILE - PDF has ...", Remark written (-> Missing PDFs list as
                                wrong file), no Gemini call; generate_master_csvs stops if you type it
     no QR readable (Soukya) -> "NO QR", same checks as before
+3-way match columns: "QR Total", "Gemini Total" (taxable + tax each) and a live "3-Way Match" formula
+against your total in column N; generate_master_csvs stops if your total is off the QR total.
 Gemini first gets only 2-3 pages per invoice (its QR page + the last 2 pages of its part of the
 PDF, where Tax Details is); if that answer fails any check the FULL PDF is sent, as before.
 
@@ -45,7 +47,8 @@ from datetime import datetime
 import sys
 import time
 import urllib.request
-from build_entry_workbook import NO_GEMINI, PRINTED_TAX, GEMINI_CHECK, GEMINI_NOTE, QR_CHECK
+from build_entry_workbook import (NO_GEMINI, PRINTED_TAX, GEMINI_CHECK, GEMINI_NOTE, QR_CHECK,
+                                  QR_TOTAL, GEMINI_TOTAL, MATCH_3WAY)
 
 # ---- pricing / tuning ----
 MODEL = "gemini-2.5-flash"
@@ -611,10 +614,20 @@ def _download(url, hub, basename, root):
     return target
 
 
+def match_formula(r, qc, gc):
+    """Live Excel check for row r: your total (N = taxable + GST) vs QR total (column qc) vs Gemini total (gc),
+    Rs 1 tolerance. Updates the moment you type E/F."""
+    n, q, g = f"N{r}", f"{qc}{r}", f"{gc}{r}"
+    return (f'=IF(AND(E{r}="",F{r}=""),"",IF({q}="",IF({g}="","nothing to match",'
+            f'IF(ABS({n}-{g})<=1,"MATCH Gemini (no QR)","NOT MATCH Gemini")),'
+            f'IF(ABS({n}-{q})>1,"NOT MATCH QR",IF({g}="","MATCH QR",'
+            f'IF(ABS({n}-{g})<=1,"MATCH all 3","NOT MATCH Gemini")))))')
+
+
 def gemini_cols(ws):
     """Header name -> column number; adds the Gemini / QR columns if an older sheet lacks them."""
     col = {c.value: c.column for c in ws[1] if c.value}
-    for name in (NO_GEMINI, PRINTED_TAX, GEMINI_CHECK, GEMINI_NOTE, QR_CHECK):
+    for name in (NO_GEMINI, PRINTED_TAX, GEMINI_CHECK, GEMINI_NOTE, QR_CHECK, QR_TOTAL, GEMINI_TOTAL, MATCH_3WAY):
         if name not in col:
             col[name] = ws.max_column + 1
             ws.cell(1, col[name]).value = name
@@ -629,9 +642,15 @@ def fill_sheet(ws, root, call=None):
     call given: a PDF with no saved/text answer is sent to Gemini once (2-3 pages per invoice first,
     the full PDF if that fails) and the answer saved first. Returns a dict of counts."""
     from openpyxl.styles import PatternFill
+    from openpyxl.utils import get_column_letter
     from missing_tracker import VERIFY
     green, red = PatternFill("solid", fgColor="C6EFCE"), PatternFill("solid", fgColor="FFC7CE")
     col = gemini_cols(ws)
+    qcl, gcl = get_column_letter(col[QR_TOTAL]), get_column_letter(col[GEMINI_TOTAL])
+
+    def put_total(row, name, v):
+        c = ws.cell(row, col[name])
+        c.value, c.number_format = (round(v, 2) if v is not None else None), "#,##0.00"
     n = dict(rows=0, marked=0, typed=0, saved=0, text_read=0, new_calls=0, cost_rs=0.0, passed=0, review=0,
              not_read=0, retried=0, rescued=0, qr_ok=0, wrong_file=0, no_qr=0, date_fixed=0, sliced=0,
              full_after_slice=0)
@@ -641,6 +660,7 @@ def fill_sheet(ws, root, call=None):
         if ext is None or not fn:
             continue
         n["rows"] += 1
+        ws.cell(row, col[MATCH_3WAY]).value = match_formula(row, qcl, gcl)
         read = True                      # False: marked x / typed by you -> QR check only, amounts untouched
         if str(ws.cell(row, col[NO_GEMINI]).value or "").strip():
             n["marked"] += 1
@@ -715,6 +735,7 @@ def fill_sheet(ws, root, call=None):
             qc = ws.cell(row, col[QR_CHECK])
             if not (status == "OK" and str(qc.value or "").startswith("OK")):   # keep "OK - date changed" on re-runs
                 qc.value = status
+            put_total(row, QR_TOTAL, float(q["TotInvVal"]) if q else None)
             if read and (q or status == "NO QR"):
                 need.append((row, ext, fn, q))
         if not need:
@@ -780,6 +801,8 @@ def fill_sheet(ws, root, call=None):
                     n["rescued"] += bool(a)
                     save_raw(rec)
                     j = judge(ext, fn, rec["invoices"], pages, q)
+            put_total(row, GEMINI_TOTAL, (m.get("amount_5") or 0) + (m.get("amount_18") or 0)
+                      + (m.get("printed_total_tax") or 0) if m else None)
             if j["status"] == "PASS":
                 ws.cell(row, COL_A5).value = j["a5"]
                 ws.cell(row, COL_A18).value = j["a18"]
