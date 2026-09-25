@@ -16,6 +16,7 @@ Human enters only the 5% / 18% taxable amounts; everything else is automated.
   - `_booked.csv`   – ledger of every invoice already imported (never re-listed)
   - `MISSING_PDFS.xlsx` – the **Missing PDFs list** (tab `Chase`): every invoice not booked yet + why
   - `Gemini/raw/*.json` – every Gemini answer, one file per PDF (never paid twice);
+    `Gemini/qr/*.json` – the e-invoice QRs read from each PDF (free, on your PC, read once);
     `Gemini/Gemini_Results.xlsx` – those answers vs what went into the import files
   - `CDMS_Recovered.csv` – PDFs CDMS found for the Missing PDFs list today (read by steps 1–2, archived in step 7)
   - `<Location>/PDFs/<date>/`   – signed invoice PDFs;  `<Location>/Booked/` – PDFs after import
@@ -46,6 +47,10 @@ Human enters only the 5% / 18% taxable amounts; everything else is automated.
      (already booked / no link / same wrong PDF / unknown hub — the last three are on the Missing PDFs list).
      An unknown hub name is printed as **UNKNOWN HUB** (add it to `ALIASES`/`HUBS` in `build_entry_workbook.py`).
      Refuses to overwrite a `Master_Entry.xlsx` that already has amounts (finish that batch first).
+     **QR check** (free, on your PC, ~1 sec per PDF): the GST e-invoice QR of every PDF is read →
+     **`QR Check`** column `OK` / `WRONG FILE - PDF has …` / `NO QR`. `OK` rows get the **Invoice Date
+     from the QR** (= the printed invoice date; we book on it). `WRONG FILE` rows get a **Remark written for
+     you**, so they go on the Missing PDFs list as "wrong file" — no need to type it.
 3. **Fill amounts — you choose, row by row.** Open `Master_Entry.xlsx`:
    - **type it yourself:** fill the YELLOW `Amount_5%` / `Amount_18%` (and `IGST?` for a rare inter-state row);
    - **no Gemini for this row:** type `x` in **`No Gemini (type x)`** (e.g. for the 5–6 you want to do by hand);
@@ -57,16 +62,23 @@ Human enters only the 5% / 18% taxable amounts; everything else is automated.
      key needed. Only scanned PDFs go to Gemini (needs `GEMINI_API_KEY`). It **never touches** a row
      you typed or marked `x`. Every answer is saved first in
      `5_NetSuite_Booking\Gemini\raw\` (one file per PDF) and the Master is filled from there — the same
-     PDF is never paid for twice. A row is filled only when the tax matches the printed tax (±₹1);
-     otherwise it is red **REVIEW** with the printed tax in **`Printed Tax (Gemini)`** — fill those by hand.
+     PDF is never paid for twice. Gemini first gets only 2–3 pages per invoice (its QR page + the last
+     2 pages, where Tax Details is); if any check fails, the full PDF is sent. WRONG FILE rows are never
+     sent. A row is filled only when the tax matches the printed tax **and** taxable + tax matches the
+     QR total (±₹1 each); otherwise it is red **REVIEW** with the printed tax in **`Printed Tax (Gemini)`**
+     — fill those by hand.
+   - **3-way match:** `QR Total`, `Gemini Total` (taxable + tax each) and **`3-Way Match`** sit on the
+     right. `3-Way Match` compares your total (column N) with both, live as you type: `MATCH all 3` /
+     `MATCH QR` / `MATCH Gemini (no QR)` are fine; `NOT MATCH …` = open the PDF and check.
    - Save.
 4. **Generate the combined import files**
    `python generate_master_csvs.py`                     (address label included)
    `python generate_master_csvs.py --no-vendor-select`  (omit address)
    → `1_ALL_Bills_Header.csv`, `2_ALL_Bills_Expenses.csv`, `ALL_Tax_Verification.csv`, `ALL_Invoices.zip`.
    **Money check:** if a row's amounts don't match the tax printed on its PDF (`Printed Tax (Gemini)`,
-   more than ₹1 off), it STOPS and writes nothing — fix those rows. Only if you checked the PDF and
-   Gemini misread the printed tax: `--accept=<invoice>,<invoice>`.
+   more than ₹1 off), it STOPS and writes nothing — fix those rows. **QR check:** it also stops when your
+   taxable + tax is more than ₹1 off the `QR Total`, or when a `WRONG FILE` row has amounts. Only if you
+   checked the PDF and it is right: `--accept=<invoice>,<invoice>`.
    Also updates the Missing PDFs list (rows left out of this batch) and
    `5_NetSuite_Booking\Gemini\Gemini_Results.xlsx` (every Gemini answer vs what went into the import).
    Tax-math self-test: `python generate_master_csvs.py --selfcheck`.
@@ -104,7 +116,7 @@ another script's rows — and a row leaves the list only when the invoice is in 
 | `no S3 link (GRN)` | `download_hul_pdfs.py` | nothing — step 1 re-checks CDMS (when the token is valid) |
 | `CDMS: PDF not attached yet` | `download_invoices.py` | ask the hub to upload the signed invoice |
 | `CDMS: not found in portal` | `download_invoices.py` | check the invoice number |
-| `wrong file …` / `CDMS: still the same wrong file` | `mark_booked.py` / `download_invoices.py` | ask the hub to re-upload the right PDF |
+| `wrong file …` / `CDMS: still the same wrong file` | `mark_booked.py` (from your Remark, or the one the QR check wrote) / `download_invoices.py` | ask the hub to re-upload the right PDF |
 | `CDMS: PDF found …` | `download_invoices.py` | nothing — it is in the next `Master_Entry.xlsx` |
 | `left blank in Master_Entry` | `mark_booked.py` | nothing — listed again next day |
 | `unknown hub '…'` | `build_master_workbook.py` | add the spelling to `ALIASES` (or a new hub to `HUBS`) in `build_entry_workbook.py` |

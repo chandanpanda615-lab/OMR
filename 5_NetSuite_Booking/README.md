@@ -38,6 +38,7 @@ exact names and location or the scripts break.
 │                                   download + build read it, archive_batch.py archives it
 ├─ Gemini\                   LIVE  every Gemini answer, kept forever (never delete - it is paid for)
 │   ├─ raw\<md5>.json               one file per PDF = exactly what Gemini read; reused, never re-paid
+│   ├─ qr\<md5>.json                e-invoice QRs found in that PDF (read free on this PC, read once)
 │   └─ Gemini_Results.xlsx          those answers vs what went into the import files (SAME / DIFFERENT)
 └─ Archive\                  finished batches — nothing here is read by the scripts
     ├─ Combined_2026-09-17\
@@ -57,13 +58,19 @@ exact names and location or the scripts break.
    Booked (skip) / No link (list). No-link rows go on the Missing PDFs list.
 2. `python build_master_workbook.py "path\to\GRN.csv"` → ONE `Master_Entry.xlsx` (GRN + recovered),
    pre-filled from saved Gemini answers. Refuses to overwrite a `Master_Entry.xlsx` that has amounts.
+   Reads every PDF's e-invoice QR (free): `QR Check` = OK / WRONG FILE / NO QR, Invoice Date set from
+   the QR, and a WRONG FILE row gets its Remark written for you (→ Missing PDFs list as "wrong file").
 3. In `Master_Entry.xlsx`, per row: type the amounts yourself, OR type `x` in `No Gemini`, OR type a
    `Remark` if you can't book it (→ Missing PDFs list as "wrong file"). Then optionally
    `python fill_tax_from_pdfs.py` - text PDFs (copyable text, e.g. Chrompet) are read on your PC first,
-   free; only scans go to Gemini. Answers are saved in `Gemini\` first (never paid/read twice).
-   Unsure rows are red REVIEW with the printed tax shown - fill those by hand. Save.
+   free; only scans go to Gemini (2-3 pages per invoice first, the full PDF if a check fails; WRONG FILE
+   rows never). Answers are saved in `Gemini\` first (never paid/read twice).
+   Unsure rows are red REVIEW with the printed tax shown - fill those by hand, and check `3-Way Match`
+   (your total vs QR total vs Gemini total) says MATCH. Save.
 4. `python generate_master_csvs.py` → the 4 `ALL_*` import files. STOPS if a row's amounts don't match
-   the tax printed on its PDF. Updates the Missing PDFs list and `Gemini\Gemini_Results.xlsx`.
+   the tax printed on its PDF, if your taxable + tax is off the QR total, or if a WRONG FILE row has
+   amounts (`--accept=<invoice>` after you checked the PDF). Updates the Missing PDFs list and
+   `Gemini\Gemini_Results.xlsx`.
 5. In NetSuite: upload `ALL_Invoices.zip` to the File Cabinet **FIRST**, then
    Import CSV Records (header + expenses) with **RUN SERVER SUITESCRIPT ✔**.
 6. `python mark_booked.py`
