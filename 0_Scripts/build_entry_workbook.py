@@ -160,8 +160,9 @@ ENTRY_WIDTHS = [15, 12, 13, 42, 12, 12, 13, 11, 11, 11, 11, 11, 11, 20]
 # the rest are looked up by NAME. "No Gemini": type x -> fill_tax_from_pdfs never reads that row.
 NO_GEMINI, PRINTED_TAX, GEMINI_CHECK, GEMINI_NOTE = ("No Gemini (type x)", "Printed Tax (Gemini)",
                                                      "Gemini Check", "Gemini note")
-MASTER_EXTRA = ["Hub", "Remark", NO_GEMINI, PRINTED_TAX, GEMINI_CHECK, GEMINI_NOTE]
-MASTER_EXTRA_WIDTHS = [16, 30, 11, 14, 12, 60]
+QR_CHECK = "QR Check"   # OK / WRONG FILE - ... / NO QR, from the e-invoice QR (fill_tax_from_pdfs)
+MASTER_EXTRA = ["Hub", "Remark", NO_GEMINI, PRINTED_TAX, GEMINI_CHECK, GEMINI_NOTE, QR_CHECK]
+MASTER_EXTRA_WIDTHS = [16, 30, 11, 14, 12, 60, 40]
 
 
 def add_entry_row(ws, inv, idate, brand, pdf, igst_editable):

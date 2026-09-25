@@ -23,7 +23,7 @@ Writes: <OUT_ROOT>\\1_ALL_Bills_Header.csv, 2_ALL_Bills_Expenses.csv,
 """
 import csv, os, sys, zipfile
 from openpyxl import load_workbook
-from build_entry_workbook import HUBS, config_rows, OUT_ROOT, ENTRY_HEADERS, PRINTED_TAX
+from build_entry_workbook import HUBS, config_rows, OUT_ROOT, ENTRY_HEADERS, PRINTED_TAX, QR_CHECK
 from generate_import_csvs import HEADER_COLS, EXP_COLS, process_entry_row, fmt_date
 import missing_tracker as mt
 
@@ -81,12 +81,19 @@ def main():
     wb = load_workbook(entry_path, data_only=True)
     hdr = [c.value for c in wb["Entry"][1]]
     p_idx = hdr.index(PRINTED_TAX) if PRINTED_TAX in hdr else None
+    q_idx = hdr.index(QR_CHECK) if QR_CHECK in hdr else None
     header_rows, exp_rows, verify_rows, warnings, blocked = [], [], [], [], []
     for r in wb["Entry"].iter_rows(min_row=2, values_only=True):
         inv = r[0]
         if inv is None:
             continue
         if str(inv) in skip:
+            continue
+        qr = str(r[q_idx] or "") if q_idx is not None and len(r) > q_idx else ""
+        if (qr.startswith("WRONG FILE") and (r[4] not in (None, "") or r[5] not in (None, ""))
+                and str(inv).strip() not in accept):
+            blocked.append(f"  {inv}  ({r[HUB_IDX] if len(r) > HUB_IDX else ''}): amounts typed, but the QR says "
+                           f"{qr} - this PDF is another invoice")
             continue
         gap = tax_gap(r[4], r[5], r[p_idx]) if p_idx is not None and len(r) > p_idx else None
         if gap is not None and abs(gap) > 1 and str(inv).strip() not in accept:
@@ -105,10 +112,10 @@ def main():
         header_rows.append(h); exp_rows += e; verify_rows.append(v)
 
     if blocked:
-        sys.exit("STOPPED - nothing written. These rows don't match the printed tax on their PDF:\n"
+        sys.exit("STOPPED - nothing written. These rows don't match their PDF:\n"
                  + "\n".join(blocked)
-                 + "\nOpen each PDF, correct Amount_5% / Amount_18%, save, and run again.\n"
-                 "Only if you checked the PDF and Gemini misread the printed tax: "
+                 + "\nOpen each PDF, correct Amount_5% / Amount_18% (or clear them for a wrong file), save, and run again.\n"
+                 "Only if you checked the PDF and it is right: "
                  "python generate_master_csvs.py --accept=<invoice>,<invoice>")
     assert header_rows, "No bills generated - did you fill amounts and save Master_Entry.xlsx?"
 

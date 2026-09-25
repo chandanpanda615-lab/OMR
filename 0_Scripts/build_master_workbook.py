@@ -151,6 +151,8 @@ def main():
     print(f"  from today's GRN ................ {total - counts['recovered']}")
     print(f"  from CDMS recovery .............. {counts['recovered']}")
     print(f"  pre-filled, no cost .............. {g['passed']}  (of which free text read: {g['text_read']})  (+{g['review']} marked REVIEW)")
+    print(f"  QR check ........................ right PDF {g['qr_ok']} (date fixed {g['date_fixed']}), "
+          f"WRONG FILE {g['wrong_file']}, no QR {g['no_qr']}")
     print(f"  not listed - already booked ..... {counts['already']}")
     print(f"  not listed - no PDF link yet .... {counts['missing']}   (on the Missing PDFs list)")
     print(f"  not listed - same wrong PDF ..... {counts['wrong']}   (on the Missing PDFs list)")
