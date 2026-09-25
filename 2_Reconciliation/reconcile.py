@@ -10,10 +10,17 @@ Usage: python reconcile.py [folder]
   - folder given  -> reconcile exactly that folder (name relative to this script, or a full path)
   - no folder     -> list the day-folders and ask which one (no silent auto-pick)
 """
-import sys, glob, os
+import sys, glob, os, re
 import pandas as pd
+from openpyxl.worksheet.hyperlink import Hyperlink
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "0_Scripts"))
+from build_entry_workbook import HUBS, hub_key    # hub names = NetSuite Location names
+from mark_booked import load_booked              # _booked.csv
+import missing_tracker as mt                     # Missing PDFs list
+HUB_NAMES = [h["Location"] for h in HUBS.values()]
+NOT_CHASED = "NOT BOOKED, NOT CHASED"
 
 
 def resolve(folder):
@@ -56,8 +63,61 @@ def load_grn(path):
     for c in NUM_COLS:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
     df["Taxable"] = df["NetAmt"] - df[TAX_COLS].sum(axis=1)
-    df["Hub"] = os.path.splitext(os.path.basename(path))[0]
+    name = os.path.splitext(os.path.basename(path))[0]      # rename each GRN file to its hub: OMR.xlsx
+    k = hub_key(name)
+    df["Hub"] = HUBS[k]["Location"] if k in HUBS else name
+    if k not in HUBS:
+        print(f"WARNING: '{os.path.basename(path)}' is not a hub name - rename it to one of: {', '.join(HUB_NAMES)}")
     return df
+
+
+def hub_summary(rec, grn_hubs):
+    """One row per hub (all hubs, even with no GRN file) + TOTAL: the pivot of the Reconciliation sheet."""
+    rows = []
+    for hub in HUB_NAMES + sorted(set(rec["Hub"]) - set(HUB_NAMES)):
+        x = rec[rec["Hub"] == hub]
+        go = x[x["Status"].str.startswith("GRN_ONLY")]
+        nc = go[go["Track"] == NOT_CHASED]
+        ns_only = x[x["Status"].str.startswith("NS_ONLY")]
+        rows.append({
+            "Hub": hub,
+            "GRN file": "yes" if hub in grn_hubs else "NO GRN FILE",
+            "GRN invoices": int((x["GRN_Taxable"] != 0).sum()),
+            "GRN taxable": round(x["GRN_Taxable"].sum(), 2),
+            "NS taxable": round(x["NS_Taxable"].sum(), 2),
+            "GRN - NS": round(x["GRN_Taxable"].sum() - x["NS_Taxable"].sum(), 2),
+            "Match": int((x["Status"] == "MATCH").sum()),
+            "Mismatch (amount/hub)": int(x["Status"].isin(["MISMATCH", "HUB_MISMATCH"]).sum()),
+            "GRN only": len(go),
+            "..booked, not in NS export yet": int(go["Track"].str.startswith("booked").sum()),
+            "..on Missing PDFs list": int(go["Track"].str.startswith("Missing").sum()),
+            "..NOT booked, NOT chased": len(nc),
+            "..NOT chased taxable": round(nc["GRN_Taxable"].sum(), 2),
+            "NS only": len(ns_only),
+            "NS only taxable": round(ns_only["NS_Taxable"].sum(), 2),
+        })
+    s = pd.DataFrame(rows)
+    total = {c: (s[c].sum() if c not in ("Hub", "GRN file") else "") for c in s.columns}
+    total["Hub"] = "TOTAL"
+    return pd.concat([s, pd.DataFrame([total])], ignore_index=True)
+
+
+def write_hub_sheets(xl, hubs, rec):
+    """One sheet per hub that has rows; hub name in Hub_Summary links to it, and back."""
+    summary_ws = xl.book["Hub_Summary"]
+    for i, hub in enumerate(hubs["Hub"], start=2):      # row 1 = header
+        rows = rec[rec["Hub"] == hub]
+        if hub == "TOTAL" or rows.empty:
+            continue
+        name = re.sub(r"[\\/*?:\[\]]", "-", str(hub))[:31]
+        rows.to_excel(xl, sheet_name=name, index=False, startrow=1)  # row 1 kept for the back link
+        back = xl.book[name]["A1"]
+        back.value, back.style = "<< Hub_Summary", "Hyperlink"
+        back.hyperlink = Hyperlink(ref="A1", location="Hub_Summary!A1")   # internal link needs location, not target
+        xl.book[name].freeze_panes = "A3"
+        cell = summary_ws.cell(row=i, column=1)
+        cell.style = "Hyperlink"
+        cell.hyperlink = Hyperlink(ref=cell.coordinate, location=f"'{name}'!A1")
 
 
 def main():
@@ -68,6 +128,8 @@ def main():
     if ns_path is None:
         sys.exit(f"No '{NS_NAME}' found in {FOLDER}. Rename the NetSuite export to '{NS_NAME}' and re-run.")
     grn_files = [f for f in files if f != ns_path]
+    if not grn_files:
+        sys.exit(f"No GRN files in {FOLDER} - add one Product Wise Purchase file per hub, named like OMR.xlsx")
     print(f"Folder    : {FOLDER}")
     print(f"NS export : {os.path.basename(ns_path)}")
     print(f"GRN hubs  : {[os.path.basename(f) for f in grn_files]}")
@@ -106,23 +168,55 @@ def main():
             return "GRN_ONLY (not in NS)"
         if r["_merge"] == "right_only":
             return "NS_ONLY (not in GRN)"
+        if r["GRN_Hub"] != r["NS_Location"]:
+            return "HUB_MISMATCH"           # booked under another hub's vendor/location
         return "MATCH" if abs(r["Diff"]) < TOL else "MISMATCH"
 
     rec["Status"] = rec.apply(status, axis=1)
     rec = rec.drop(columns="_merge").sort_values(["Status", "Invoice"]).reset_index(drop=True)
+    rec.insert(0, "Hub", rec["GRN_Hub"].fillna(rec["NS_Location"]))
+
+    # --- what happened to each GRN_ONLY invoice (booked lane + Missing PDFs list) ---
+    booked, chase = load_booked(), mt.load()
+
+    def track(r):
+        inv = str(r["Invoice"]).strip()
+        if not r["Status"].startswith("GRN_ONLY"):
+            return ""
+        if inv in booked:
+            return "booked - not in this NS export yet"
+        if inv in chase:
+            return "Missing PDFs list: " + chase[inv]["status"]
+        return NOT_CHASED
+
+    rec.insert(rec.columns.get_loc("Status") + 1, "Track", rec.apply(track, axis=1))
 
     # --- summary ---
     summ = rec["Status"].value_counts().rename_axis("Status").reset_index(name="Invoices")
+    grn_hubs = set(grn["Hub"])
+    hubs = hub_summary(rec, grn_hubs)
 
     out = os.path.join(FOLDER, "Reconciliation_result.xlsx")
-    with pd.ExcelWriter(out) as xl:
+    with pd.ExcelWriter(out, engine="openpyxl") as xl:
+        hubs.to_excel(xl, sheet_name="Hub_Summary", index=False)
         rec.to_excel(xl, sheet_name="Reconciliation", index=False)
         summ.to_excel(xl, sheet_name="Summary", index=False)
         grn.to_excel(xl, sheet_name="GRN_Consolidated_EGIR", index=False)
+        write_hub_sheets(xl, hubs, rec)
 
     print("\n=== SUMMARY ===")
     print(summ.to_string(index=False))
     print(f"\nGRN EGIR invoices: {len(grn_inv)} | NS invoices: {len(ns_inv)}")
+    print("\n=== PER HUB ===")
+    print(hubs[["Hub", "GRN file", "GRN invoices", "Match", "Mismatch (amount/hub)", "GRN only",
+                "..NOT booked, NOT chased", "NS only", "GRN - NS"]].to_string(index=False))
+    missing = [h for h in HUB_NAMES if h not in grn_hubs]
+    if missing:
+        print(f"\nNo GRN file for: {', '.join(missing)}  (their NetSuite bills show as NS_ONLY)")
+    nc = rec[rec["Track"] == NOT_CHASED]
+    if len(nc):
+        print(f"\n!! {len(nc)} invoice(s) received but NOT booked and NOT on the Missing PDFs list "
+              f"(taxable {nc['GRN_Taxable'].sum():,.2f}) - see Track column")
     print(f"Wrote: {out}")
     bad = rec[rec["Status"].isin(["MISMATCH"])]
     if len(bad):

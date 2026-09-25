@@ -28,7 +28,7 @@ Human enters only the 5% / 18% taxable amounts; everything else is automated.
 
 1. **Download PDFs** (HUL + HUL SAMADHAN only)
    `python download_hul_pdfs.py "C:\path\to\grn_copy_upload_data.csv"`
-   - **CDMS check first**, if `CDMS_Tool\token.txt` is still valid (refresh it by hand — see
+   - **CDMS check first**, the token refreshes itself from `CDMS_Tool\refresh.txt` (see
      `CDMS_Tool\HOW_TO_RUN.txt`): every invoice on the Missing PDFs list is looked up in CDMS; PDFs
      found are downloaded in this same step. Token expired → "CDMS check SKIPPED", the rest still runs.
    - Prints a per-hub table:
@@ -52,8 +52,10 @@ Human enters only the 5% / 18% taxable amounts; everything else is automated.
    - **can't book it** (wrong PDF / bad details): leave amounts blank, type a reason in **`Remark`** →
      it goes on the Missing PDFs list as "wrong file" and that same PDF is never listed again.
      A pre-filled "VERIFY" remark = this invoice had a wrong PDF before: check the new one: correct -> type the amounts (booked); still wrong -> type your own remark. Left untouched = listed again next day.
-   - then, for all other rows, optionally: `python fill_tax_from_pdfs.py` (Gemini, needs `GEMINI_API_KEY`).
-     It **never touches** a row you typed or marked `x`. Every answer is saved first in
+   - then, for all other rows, optionally: `python fill_tax_from_pdfs.py`.
+     Text PDFs (copyable text, e.g. Chrompet) are read on your PC first — free, 5 math checks, no API
+     key needed. Only scanned PDFs go to Gemini (needs `GEMINI_API_KEY`). It **never touches** a row
+     you typed or marked `x`. Every answer is saved first in
      `5_NetSuite_Booking\Gemini\raw\` (one file per PDF) and the Master is filled from there — the same
      PDF is never paid for twice. A row is filled only when the tax matches the printed tax (±₹1);
      otherwise it is red **REVIEW** with the printed tax in **`Printed Tax (Gemini)`** — fill those by hand.

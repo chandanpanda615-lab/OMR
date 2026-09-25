@@ -52,15 +52,16 @@ exact names and location or the scripts break.
 
 (`RUN_DAY.bat "path\to\GRN.csv"` in `0_Scripts\` = steps 1 + 2.)
 1. `python download_hul_pdfs.py "path\to\GRN.csv"` → first re-checks the Missing PDFs list in CDMS
-   (only if `CDMS_Tool\token.txt` is still valid - refresh it by hand), then downloads GRN + CDMS-found
+   (token refreshes itself - see `CDMS_Tool\HOW_TO_RUN.txt`), then downloads GRN + CDMS-found
    PDFs into `<Hub>\PDFs\<yyyy-mm-dd>\` and prints per hub: Downloaded now / Already on disk /
    Booked (skip) / No link (list). No-link rows go on the Missing PDFs list.
 2. `python build_master_workbook.py "path\to\GRN.csv"` → ONE `Master_Entry.xlsx` (GRN + recovered),
    pre-filled from saved Gemini answers. Refuses to overwrite a `Master_Entry.xlsx` that has amounts.
 3. In `Master_Entry.xlsx`, per row: type the amounts yourself, OR type `x` in `No Gemini`, OR type a
    `Remark` if you can't book it (→ Missing PDFs list as "wrong file"). Then optionally
-   `python fill_tax_from_pdfs.py` - Gemini reads only the untouched rows; answers are saved in `Gemini\`
-   first. Unsure rows are red REVIEW with the printed tax shown - fill those by hand. Save.
+   `python fill_tax_from_pdfs.py` - text PDFs (copyable text, e.g. Chrompet) are read on your PC first,
+   free; only scans go to Gemini. Answers are saved in `Gemini\` first (never paid/read twice).
+   Unsure rows are red REVIEW with the printed tax shown - fill those by hand. Save.
 4. `python generate_master_csvs.py` → the 4 `ALL_*` import files. STOPS if a row's amounts don't match
    the tax printed on its PDF. Updates the Missing PDFs list and `Gemini\Gemini_Results.xlsx`.
 5. In NetSuite: upload `ALL_Invoices.zip` to the File Cabinet **FIRST**, then

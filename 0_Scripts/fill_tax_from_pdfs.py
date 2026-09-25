@@ -13,6 +13,9 @@ PDF, never overwritten) and the Master is then filled FROM those saved answers. 
     - Gemini\\Gemini_Results.xlsx lists every answer next to what was finally put in the import
       file, so you can see how often Gemini was right (refreshed here and by generate_master_csvs).
 
+A PDF with copyable text (Chrompet) is read LOCALLY first, free: saved the same way with model
+"pdf-text", but only if every amount passes 5 math checks (see parse_text). Otherwise -> Gemini.
+
 Gemini only READS: 5% taxable, 18% taxable, IGST yes/no, printed invoice no (on 2 pages),
 invoice date, printed total tax. All tax math stays in Python.
 SAFETY: a row is filled ONLY if the computed tax matches the printed total tax (within Rs 1).
@@ -28,6 +31,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 from datetime import datetime
 import sys
 import time
@@ -38,8 +42,9 @@ from build_entry_workbook import NO_GEMINI, PRINTED_TAX, GEMINI_CHECK, GEMINI_NO
 MODEL = "gemini-2.5-flash"
 IN_PRICE = 0.30 / 1_000_000
 OUT_PRICE = 2.50 / 1_000_000   # output AND thinking tokens
-USD_INR = 84.0
-THINKING_BUDGET = 512          # 0 mis-reads the slab split; 512 reads it (verified on real HUL scans)
+USD_INR = 95.69
+THINKING_BUDGET = 1024         # 0 mis-reads the slab split; 512 reads it (verified on real HUL scans); doubled for headroom - it's a cap, not a flat cost
+RESCUE_THINKING_BUDGET = 2048   # rescue is a single cropped page for an already-failed PDF - give it more room than the first pass
 CHECKSUM_TOLERANCE = 1.0       # rupees; absorbs per-line GST rounding
 RETRIES = 3
 
@@ -63,13 +68,20 @@ PROMPT = (
     "Tax on Net Taxable Turnover) and the totals box (Total Taxes, Invoice Amt); this page also "
     "prints 'Invoice Number' at the top. "
     "In the Tax Details table the GST slabs are printed as: 5% slab = CGST 2.5% + SGST 2.5% (or IGST 5%); "
-    "18% slab = CGST 9% + SGST 9% (or IGST 18%). Amounts use Indian digit grouping (1,75,231.05 = 175231.05). "
+    "18% slab = CGST 9% + SGST 9% (or IGST 18%). The State GST row repeats the SAME taxable value as its "
+    "Central GST row - the slab's taxable value is that value ONCE, never Central + State added. "
+    "Amounts use Indian digit grouping (1,75,231.05 = 175231.05). "
     "For each invoice return (read printed values, do not compute): the Invoice Number from page A; "
     "the Invoice Date from page A exactly as printed (dd.mm.yyyy); the Invoice Number from page B; "
     "the total TAXABLE value (pre-tax base) of the 5% slab from page B (0 if none); the total TAXABLE "
     "value of the 18% slab from page B (0 if none); whether IGST is charged (yes/no); and the "
-    "'Total Taxes' amount from page B (CGST+SGST, or IGST)."
+    "'Total Taxes' amount from page B (CGST+SGST, or IGST); the 'Invoice Amt' from the same totals box; "
+    "and the page number of page B in this file."
 )
+RETRY_PROMPT = ("This image is the 'Tax Details' page of a Hindustan Unilever GST tax invoice (it may be rotated). "
+                "Read the printed values, do not compute. Amounts use Indian digit grouping (1,17,393.98 = 117393.98).")
+RESCUE_KEYS = ("amount_5", "amount_18", "is_igst", "printed_total_tax", "invoice_amt", "dr_cr_adjustments",
+               "tax_page_invoice_no")
 
 
 # ---------- pure logic (unit-tested by --selftest, no API) ----------
@@ -88,6 +100,18 @@ def reconcile(a5, a18, printed_tax):
     if abs(diff) <= CHECKSUM_TOLERANCE:
         return "PASS", ""
     return "REVIEW", f"checksum off by {diff:,.2f} (computed {compute_tax(a5, a18):,.2f} vs printed {printed_tax:,.2f})"
+
+
+def amt_gap(a5, a18, printed_tax, invoice_amt, adj=0):
+    """taxable + tax - printed Invoice Amt (same as text check 5); None when Invoice Amt was not read
+    (answers saved before 25-Sep). Catches a read that is wrong yet adds up, e.g. CGST+SGST rows added.
+    Invoice Amt can be hidden under the hub stamp, so a read of Net Payable (= Invoice Amt + Dr/Cr adj)
+    is accepted too (25-Sep 9629078879: adj -8,021.00)."""
+    if not invoice_amt:
+        return None
+    gap = round((a5 or 0) + (a18 or 0) + (printed_tax or 0) - invoice_amt, 2)
+    net = round(gap + (adj or 0), 2)
+    return net if abs(net) < abs(gap) else gap
 
 
 def to_ddmmyyyy(s):
@@ -117,9 +141,10 @@ def match_invoice(external_id, extracted):
     return None
 
 
-def judge(ext, fn, invoices):
+def judge(ext, fn, invoices, pages=None):
     """Decide one Master row from the invoices Gemini read in its PDF -> dict with
-    status PASS/REVIEW, note, printed (tax), and a5/a18/igst/date when PASS."""
+    status PASS/REVIEW, note, printed (tax), and a5/a18/igst/date when PASS.
+    pages = page count of the PDF: a Tax Details page past the end means Gemini made the answer up."""
     m = match_invoice(ext, invoices)
     if m is None:
         found = ", ".join(sorted({str(e.get("external_id", "")).strip() for e in invoices} - {""})) or "none"
@@ -128,11 +153,19 @@ def judge(ext, fn, invoices):
     if str(m.get("tax_page_invoice_no", "")).strip() != str(ext).strip():
         return dict(status="REVIEW", printed=None,
                     note=f"invoice no on Tax Details page ({m.get('tax_page_invoice_no')}) != {ext}")
+    tp = m.get("retry_page") or m.get("tax_page")   # a passed retry read a real page
+    if pages and tp and tp > pages:                  # 25-Sep 9629079589: "page 8" of a 7-page PDF, amounts doubled
+        return dict(status="REVIEW", printed=None,
+                    note=f"Gemini says Tax Details is page {tp} but the PDF has only {pages} pages - made-up answer, type it")
     d = to_ddmmyyyy(m.get("invoice_date"))
     dnote = "" if d else "invoice date not read"
     if d and not date_ok(d, fn):
         d, dnote = None, f"date {d} looks wrong, sheet date kept"
     status, note = reconcile(m["amount_5"], m["amount_18"], m["printed_total_tax"])
+    gap = amt_gap(m["amount_5"], m["amount_18"], m["printed_total_tax"], m.get("invoice_amt"), m.get("dr_cr_adjustments"))
+    if status == "PASS" and gap is not None and abs(gap) > CHECKSUM_TOLERANCE:
+        status, note = "REVIEW", (f"taxable + tax is off Invoice Amt {m['invoice_amt']:,.2f} by {gap:,.2f}"
+                                  " - amounts may be doubled/swapped")
     printed = round(m.get("printed_total_tax") or 0, 2) or None
     if status == "PASS":
         return dict(status="PASS", printed=printed, a5=round(m["amount_5"], 2), a18=round(m["amount_18"], 2),
@@ -161,9 +194,40 @@ def _selftest():
     j = judge("9633128802", f, inv)
     assert j["status"] == "PASS" and j["a5"] == 151255.70 and j["date"] == "18/09/2026" and j["printed"] == 7562.84
     assert judge("9633128803", f, inv)["note"].endswith("wrong file?")                    # not in this PDF
+    inv[0]["tax_page"] = 8
+    assert judge("9633128802", f, inv, pages=8)["status"] == "PASS"
+    assert "made-up" in judge("9633128802", f, inv, pages=7)["note"]                      # page past the end
+    inv[0]["retry_page"] = 6
+    assert judge("9633128802", f, inv, pages=7)["status"] == "PASS"                       # retry read a real page
+    del inv[0]["tax_page"], inv[0]["retry_page"]
+    # 25-Sep 9629079589: CGST+SGST rows added -> doubled amount AND doubled tax still pass the checksum;
+    # the printed Invoice Amt (4,49,219.12) catches it
+    dbl = [{"external_id": "9629079589", "tax_page_invoice_no": "9629079589", "invoice_date": "24.09.2026",
+            "amount_5": 855655.32, "amount_18": 0, "is_igst": False, "printed_total_tax": 42782.92, "invoice_amt": 449219.12}]
+    g = "TLBL-HUL-24092026-9629079589-20260925063608.pdf"
+    assert "Invoice Amt" in judge("9629079589", g, dbl)["note"]
+    dbl[0].update(amount_5=427827.66, printed_total_tax=21391.46)
+    assert judge("9629079589", g, dbl)["status"] == "PASS"                                 # real values pass
+    assert amt_gap(1, 2, 3, None) is None                                                  # old answers: no check
+    assert abs(amt_gap(57043.02, 402787.93, 75353.94, 527163.89, -8021.00)) <= 1               # Net Payable read, adj explains it
     inv[0]["amount_18"] = 1000
     j = judge("9633128802", f, inv)
     assert j["status"] == "REVIEW" and j["printed"] == 7562.84 and "a5" not in j          # checksum off -> not filled
+    # text read: real 9633132412 layout (values print BEFORE their labels)
+    p1 = "TAX INVOICE\nInvoice Number  :\nPage 1 of 2\n9633132412\n" + "x" * 200 + "\n23.09.2026\nInvoice Date    :\n"
+    p2 = ("TAX INVOICE\nInvoice Number  :\nPage 2 of 2\n9633132412\n86,662.68\nTotal Taxes            :\n"
+          "7,38,409.61\nInvoice Amt            :\nTax Details\n"
+          "IN: Central GST-AA\n2,35,783.66\n2.5\n5,894.6\nIN: Central GST-AA\n4,15,963.27\n9\n37,436.74\n"
+          "IN: State GST-AA\n2,35,783.66\n2.5\n5,894.6\nIN: State GST-AA\n4,15,963.27\n9\n37,436.74\n" + "x" * 100)
+    inv, why = parse_text([p2, p1])                                                        # any page order
+    assert why is None and len(inv) == 1, why
+    e = inv[0]
+    assert (e["amount_5"], e["amount_18"], e["printed_total_tax"], e["invoice_date"], e["tax_page"], e["is_igst"]) \
+        == (235783.66, 415963.27, 86662.68, "23.09.2026", 1, False)
+    assert judge("9633132412", "CRMP-HULS-23092026-9633132412-20260923175700.pdf", inv)["status"] == "PASS"
+    assert "CGST base != SGST" in parse_text([p1, p2.replace("4,15,963.27\n9\n37,436.74\nIN: State", "4,15,963.72\n9\n37,436.74\nIN: State")])[1]
+    assert "Invoice Amt" in parse_text([p1, p2.replace("7,38,409.61", "7,38,490.61")])[1]      # one digit off
+    assert "no text" in parse_text([p1, ""])[1]                                              # scanned page -> Gemini
     print("selftest OK")
 
 
@@ -191,6 +255,93 @@ def save_raw(rec):
     with open(p + ".tmp", "w", encoding="utf-8") as f:
         json.dump(rec, f, indent=1)
     os.replace(p + ".tmp", p)
+
+
+# ---------- text PDFs: read locally, free ----------
+_N = r"(-?[\d,]+\.?\d*)"
+_TAX_ROW = re.compile(r"IN: (Central|State|Integrated) GST[^\n]*\n\s*" + _N + r"\s*\n\s*" + _N + r"\s*\n\s*" + _N)
+
+
+def _num(s):
+    return float(s.replace(",", ""))
+
+
+def parse_text(pages):
+    """Page texts of one PDF -> (invoice dicts shaped like Gemini's, None) or (None, reason).
+    Nothing is accepted unless ALL 5 math checks hold (Rs 1 tolerance; HUL rounds per item line):
+    1 row base x rate = row tax  2 CGST base = SGST base  3 row taxes add up to Total Taxes
+    4 5%/18% bases give Total Taxes  5 bases + Total Taxes = Invoice Amt."""
+    tol, by_inv = CHECKSUM_TOLERANCE, {}
+    for i, t in enumerate(pages, 1):
+        if len(t.strip()) < 200:
+            return None, f"page {i} has no text (scan)"
+        m = re.search(r"Page \d+ of \d+\s*\n\s*(\d{10})", t)
+        if not m:
+            return None, f"page {i}: invoice number not found"
+        by_inv.setdefault(m.group(1), []).append((i, t))
+    out = []
+    for inv, pl in by_inv.items():
+        date = tax_page = None
+        for i, t in pl:
+            m = re.search(r"(\d\d\.\d\d\.\d{4})\s*\nInvoice Date", t)
+            date = date or (m and m.group(1))
+            if "Tax Details" in t and "Total Taxes" in t:
+                tax_page = (i, t)
+        if not tax_page:
+            return None, f"{inv}: Tax Details page not found"
+        k, t = tax_page
+        rows = _TAX_ROW.findall(t)
+        if not rows:
+            return None, f"{inv}: no tax rows"
+        base, row_tax = {}, 0.0
+        for kind, b, r, tx in rows:
+            b, r, tx = _num(b), _num(r), _num(tx)
+            if abs(b * r / 100 - tx) > tol:
+                return None, f"{inv}: {kind} {r}% row: base x rate != tax"                    # check 1
+            base[(kind, r)] = base.get((kind, r), 0) + b
+            row_tax += tx
+        a5 = a18 = 0.0
+        for (kind, r), b in base.items():
+            if kind == "State":
+                if abs(b - base.get(("Central", r), -1)) > 0.01:
+                    return None, f"{inv}: CGST base != SGST base at {r}%"                    # check 2
+                continue
+            if r in (2.5, 5):
+                a5 += b
+            elif r in (9, 18):
+                a18 += b
+            else:
+                return None, f"{inv}: unknown tax rate {r}%"
+        mt, ma = re.search(_N + r"\s*\n\s*Total Taxes", t), re.search(_N + r"\s*\n\s*Invoice Amt", t)
+        if not (mt and ma):
+            return None, f"{inv}: Total Taxes / Invoice Amt not found"
+        total, amt = _num(mt.group(1)), _num(ma.group(1))
+        if abs(row_tax - total) > tol:
+            return None, f"{inv}: tax rows {row_tax:,.2f} != Total Taxes {total:,.2f}"          # check 3
+        if reconcile(a5, a18, total)[0] != "PASS":
+            return None, f"{inv}: 5%/18% tax != Total Taxes {total:,.2f}"                      # check 4
+        if abs(a5 + a18 + total - amt) > tol:
+            return None, f"{inv}: taxable + tax != Invoice Amt {amt:,.2f}"                     # check 5
+        out.append({"external_id": inv, "invoice_date": date, "tax_page_invoice_no": inv,
+                    "amount_5": round(a5, 2), "amount_18": round(a18, 2),
+                    "is_igst": any(kind == "Integrated" for kind, _ in base),
+                    "printed_total_tax": total, "invoice_amt": amt, "tax_page": k})
+    return out, None
+
+
+def read_text(path, md5, hub):
+    """Text PDF -> saved record (model pdf-text, Rs 0), or None -> caller uses Gemini."""
+    import fitz
+    with fitz.open(path) as doc:
+        invoices, why = parse_text([pg.get_text() for pg in doc])
+    if invoices is None:
+        print(f"    text read rejected ({why}) -> Gemini")
+        return None
+    rec = {"md5": md5, "file": os.path.basename(path), "hub": hub,
+           "read_on": datetime.now().strftime("%Y-%m-%d %H:%M"), "model": "pdf-text",
+           "cost_rs": 0.0, "invoices": invoices}
+    save_raw(rec)
+    return rec
 
 
 # ---------- Gemini I/O ----------
@@ -234,12 +385,61 @@ def make_caller(key):
         external_id: str = Field(description="Invoice Number printed at the top of the TAX INVOICE first page (page A)")
         invoice_date: str = Field(description="Invoice Date from page A, exactly as printed, dd.mm.yyyy")
         tax_page_invoice_no: str = Field(description="Invoice Number printed at the top of the Tax Details page (page B)")
-        amount_5: float = Field(description="Total TAXABLE value (pre-tax) of 5% GST items; 0 if none")
-        amount_18: float = Field(description="Total TAXABLE value (pre-tax) of 18% GST items; 0 if none")
+        amount_5: float = Field(description="Taxable Value of the ONE Central GST row with Tax Rate 2.5 (IGST: the row "
+                                            "with rate 5). The State GST row repeats the same value - do NOT add them. 0 if none")
+        amount_18: float = Field(description="Taxable Value of the ONE Central GST row with Tax Rate 9 (IGST: the row "
+                                             "with rate 18). The State GST row repeats the same value - do NOT add them. 0 if none")
         is_igst: bool = Field(description="true if IGST charged (interstate), false if CGST+SGST")
         printed_total_tax: float = Field(description="Total tax printed on the invoice (CGST+SGST or IGST); verification only")
+        invoice_amt: float = Field(description="'Invoice Amt' printed in the totals box of page B (NOT 'Net Payable'); verification only")
+        dr_cr_adjustments: float = Field(description="'Dr/Cr Adjustments' in the same totals box, with its sign; 0 if none")
+        tax_page: int = Field(description="1-based page number, in this file, of page B (the Tax Details page)")
+
+    class TaxPage(BaseModel):
+        tax_page_invoice_no: str = Field(description="Invoice Number printed at the top of this page")
+        amount_5: float = Field(description="Taxable Value of the ONE Central GST row with Tax Rate 2.5 (IGST: the row "
+                                            "with rate 5). The State GST row repeats the same value - do NOT add them. 0 if none")
+        amount_18: float = Field(description="Taxable Value of the ONE Central GST row with Tax Rate 9 (IGST: the row "
+                                             "with rate 18). The State GST row repeats the same value - do NOT add them. 0 if none")
+        is_igst: bool = Field(description="true if IGST, false if CGST+SGST")
+        printed_total_tax: float = Field(description="'Total Taxes' in the totals box")
+        invoice_amt: float = Field(description="'Invoice Amt' in the totals box (NOT 'Net Payable')")
+        dr_cr_adjustments: float = Field(description="'Dr/Cr Adjustments' in the totals box, with its sign; 0 if none")
 
     client = genai.Client(api_key=key)
+
+    def retry(path, e):
+        """REVIEW rescue: send ONLY the Tax Details page, turned upright, as one image (the whole
+        13-page scan confused Gemini; the single upright page read right 3/3 on 9633128588).
+        -> (answer that passes, or None; cost_rs). Stops at the first answer that passes."""
+        import io
+        import fitz
+        from PIL import Image
+        doc = fitz.open(path)
+        k = e.get("tax_page") or 0
+        k = k if 1 <= k <= doc.page_count else doc.page_count   # older answers: guess the last page
+        pix = doc[k - 1].get_pixmap(dpi=150)
+        im = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        cost = 0.0
+        # the HUL Tax Details page is wide: a tall image is a sideways scan (either way round)
+        for rot in ((90, 270) if im.height > im.width else (0, 180)):
+            buf = io.BytesIO()
+            im.rotate(rot, expand=True).save(buf, "PNG")
+            r = client.models.generate_content(
+                model=MODEL, contents=[types.Part.from_bytes(data=buf.getvalue(), mime_type="image/png"), RETRY_PROMPT],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json", response_schema=TaxPage,
+                    thinking_config=types.ThinkingConfig(thinking_budget=RESCUE_THINKING_BUDGET)))
+            m = r.usage_metadata
+            cost += ((m.prompt_token_count or 0) * IN_PRICE + ((m.candidates_token_count or 0)
+                     + (getattr(m, "thoughts_token_count", 0) or 0)) * OUT_PRICE) * USD_INR
+            a = r.parsed.model_dump() if r.parsed else None
+            if (a and str(a["tax_page_invoice_no"]).strip() == str(e.get("external_id", "")).strip()
+                    and reconcile(a["amount_5"], a["amount_18"], a["printed_total_tax"])[0] == "PASS"
+                    and abs(amt_gap(a["amount_5"], a["amount_18"], a["printed_total_tax"], a["invoice_amt"], a["dr_cr_adjustments"]) or 0)
+                    <= CHECKSUM_TOLERANCE):
+                return dict(a, page=k, rot=rot), round(cost, 2)
+        return None, round(cost, 2)
 
     def call(path, md5, hub):
         invoices, (ti, to, tt) = _extract(client, types, Extract, path)
@@ -250,6 +450,7 @@ def make_caller(key):
                "invoices": invoices}
         save_raw(rec)
         return rec
+    call.retry = retry
     return call
 
 
@@ -299,14 +500,16 @@ def gemini_cols(ws):
 
 
 def fill_sheet(ws, root, call=None):
-    """Fill every row that is not typed by you and not marked x, from SAVED Gemini answers.
-    call=None (build_master_workbook, or no API key): saved answers only - never costs money.
-    call given: a PDF with no saved answer is sent to Gemini once and the answer saved first.
+    """Fill every row that is not typed by you and not marked x, from SAVED answers, then a free
+    local text read of the PDF (if it has copyable text and passes the 5 math checks).
+    call=None (build_master_workbook, or no API key): saved answers + free text reads - never costs money.
+    call given: a PDF with no saved/text answer is sent to Gemini once and the answer saved first.
     Returns a dict of counts."""
     from openpyxl.styles import PatternFill
     green, red = PatternFill("solid", fgColor="C6EFCE"), PatternFill("solid", fgColor="FFC7CE")
     col = gemini_cols(ws)
-    n = dict(rows=0, marked=0, typed=0, saved=0, new_calls=0, cost_rs=0.0, passed=0, review=0, not_read=0)
+    n = dict(rows=0, marked=0, typed=0, saved=0, text_read=0, new_calls=0, cost_rs=0.0, passed=0, review=0,
+             not_read=0, retried=0, rescued=0)
     todo = []
     for row in range(2, ws.max_row + 1):
         ext, fn = ws.cell(row, 1).value, ws.cell(row, COL_FILE).value
@@ -322,8 +525,7 @@ def fill_sheet(ws, root, call=None):
         d = ws.cell(row, COL_FILE)
         todo.append((row, str(ext).strip(), str(fn).strip(), d.hyperlink.target if d.hyperlink else None,
                      str(ws.cell(row, COL_HUB).value or "").strip()))
-    if not todo or (call is None and not glob.glob(os.path.join(RAW, "*.json"))):
-        n["not_read"] = len(todo)
+    if not todo:
         return n
 
     def mark(row, printed, status, note):
@@ -355,6 +557,16 @@ def fill_sheet(ws, root, call=None):
         rec = load_raw(md5)
         if rec is not None:
             n["saved"] += len(g["rows"])
+        else:
+            try:
+                rec = read_text(g["path"], md5, g["hub"])       # free; None -> Gemini below
+            except Exception as e:
+                print(f"    [text read failed] {os.path.basename(g['path'])}: {e} -> Gemini")
+            if rec is not None:
+                n["text_read"] += len(g["rows"])
+                print(f"  [{i}/{len(groups)}] read from PDF text, free: {os.path.basename(g['path'])}")
+        if rec is not None:
+            pass
         elif call is None:
             n["not_read"] += len(g["rows"])
             continue
@@ -369,8 +581,31 @@ def fill_sheet(ws, root, call=None):
                 continue
             n["new_calls"] += 1
             n["cost_rs"] += rec["cost_rs"]
+        text = rec.get("model") == "pdf-text"
+        import fitz
+        with fitz.open(g["path"]) as doc:
+            pages = doc.page_count
         for row, ext, fn in g["rows"]:
-            j = judge(ext, fn, rec["invoices"])
+            j = judge(ext, fn, rec["invoices"], pages)
+            m = match_invoice(ext, rec["invoices"])
+            rescue = None if text else getattr(call, "retry", None)   # text answers passed 5 checks; an image won't do better
+            if j["status"] == "REVIEW" and rescue and m is not None and not m.get("retried"):
+                print(f"    {ext}: REVIEW -> retry with only the Tax Details page, upright")
+                try:
+                    a, cost = rescue(g["path"], m)
+                except Exception as ex:          # not marked retried -> tried again next run
+                    print(f"    [retry failed] {ext}: {ex}")
+                else:
+                    m["retried"] = True          # saved: a re-run never pays for this retry again
+                    if a:
+                        m["first_try"] = {k: m.get(k) for k in RESCUE_KEYS}
+                        m.update({k: a[k] for k in RESCUE_KEYS}, retry_page=a["page"], retry_rot=a["rot"])
+                    rec["cost_rs"] = round(rec.get("cost_rs", 0) + cost, 2)
+                    n["cost_rs"] += cost
+                    n["retried"] += 1
+                    n["rescued"] += bool(a)
+                    save_raw(rec)
+                    j = judge(ext, fn, rec["invoices"], pages)
             if j["status"] == "PASS":
                 ws.cell(row, COL_A5).value = j["a5"]
                 ws.cell(row, COL_A18).value = j["a18"]
@@ -380,6 +615,8 @@ def fill_sheet(ws, root, call=None):
                 n["passed"] += 1
             else:
                 n["review"] += 1
+            if text:
+                j["note"] = "; ".join(x for x in ("read from PDF text", j["note"]) if x)
             mark(row, j["printed"], j["status"], j["note"])
     return n
 
@@ -410,33 +647,38 @@ def write_view():
     ws = wb.active
     ws.title = "Results"
     ws.append(["Read on", "Hub", "PDF file", "Invoice (printed)", "Gemini 5%", "Gemini 18%", "IGST",
-               "Printed tax", "Gemini check", "Entered 5%", "Entered 18%", "Gemini vs entered"])
-    s = dict(files=len(recs), cost=sum(r.get("cost_rs", 0) for r in recs), answers=0, passed=0, same=0, diff=0)
+               "Printed tax", "Gemini check", "Entered 5%", "Entered 18%", "Gemini vs entered", "Read by"])
+    s = dict(files=sum(r.get("model") != "pdf-text" for r in recs), text=sum(r.get("model") == "pdf-text" for r in recs), cost=sum(r.get("cost_rs", 0) for r in recs), answers=0, passed=0, same=0, diff=0, rescued=0)
     for rec in sorted(recs, key=lambda r: r["read_on"]):
         for e in rec["invoices"] or [{}]:
             inv = str(e.get("external_id", "")).strip()
             chk = reconcile(e.get("amount_5"), e.get("amount_18"), e.get("printed_total_tax"))[0] if e else "nothing read"
+            if e.get("first_try"):
+                chk += " (2nd try: tax page)"      # 1st whole-PDF answer failed; kept in the json as first_try
             t = entered.get(inv)
             verdict = ""
             if t:
                 same = abs(t[0] - (e.get("amount_5") or 0)) <= 1 and abs(t[1] - (e.get("amount_18") or 0)) <= 1
                 verdict = "SAME" if same else "DIFFERENT"
-                if chk == "PASS":
+                if chk.startswith("PASS"):
                     s["same" if same else "diff"] += 1
             s["answers"] += bool(e)
-            s["passed"] += chk == "PASS"
+            s["passed"] += chk.startswith("PASS")
+            s["rescued"] += bool(e.get("first_try"))
             ws.append([rec["read_on"], rec.get("hub", ""), rec["file"], inv, e.get("amount_5"), e.get("amount_18"),
                        "y" if e.get("is_igst") else "", e.get("printed_total_tax"), chk,
-                       t[0] if t else None, t[1] if t else None, verdict])
-    for i, w in enumerate([16, 13, 52, 14, 13, 13, 5, 12, 12, 13, 13, 16], start=1):
+                       t[0] if t else None, t[1] if t else None, verdict, rec.get("model", "")])
+    for i, w in enumerate([16, 13, 52, 14, 13, 13, 5, 12, 12, 13, 13, 16, 16], start=1):
         ws.column_dimensions[ws.cell(1, i).column_letter].width = w
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
     sm = wb.create_sheet("Summary", 0)
     for label, v in [("PDFs read by Gemini (each paid once)", s["files"]),
+                     ("PDFs read from PDF text (free, 5 math checks)", s["text"]),
                      ("Total cost so far (Rs, approx)", round(s["cost"], 2)),
                      ("Invoices read", s["answers"]),
                      ("PASS (tax math matched the printed tax)", s["passed"]),
+                     ("   ... of which on the 2nd try (tax page only)", s["rescued"]),
                      ("PASS answers later in an import file", s["same"] + s["diff"]),
                      ("   ... same as Gemini", s["same"]),
                      ("   ... DIFFERENT (you changed it - check why)", s["diff"])]:
@@ -486,7 +728,9 @@ def main():
     print(f"  marked x (No Gemini) - skipped ... {n['marked']}")
     print(f"  already filled (you/Gemini) - skip {n['typed']}")
     print(f"  from saved answers (free) ........ {n['saved']}")
+    print(f"  read from PDF text (free) ........ {n['text_read']}")
     print(f"  new Gemini calls ................. {n['new_calls']} PDF(s), about Rs {n['cost_rs']:.2f}")
+    print(f"  REVIEW retried on the tax page ... {n['retried']}  (now PASS: {n['rescued']})")
     print(f"  not read (no key / no PDF) ....... {n['not_read']}")
     print(f"Filled (checksum PASS) ............. {n['passed']}")
     print(f"Left for you (red REVIEW) .......... {n['review']}")

@@ -141,7 +141,7 @@ def main():
     for i, w in enumerate(ENTRY_WIDTHS + MASTER_EXTRA_WIDTHS, start=1):
         ent.column_dimensions[ent.cell(1, i).column_letter].width = w
     ent.freeze_panes = "E2"
-    g = fill_sheet(ent, OUT_ROOT)           # saved Gemini answers only - never a new (paid) call
+    g = fill_sheet(ent, OUT_ROOT)           # saved answers + free text reads - never a paid call
 
     os.makedirs(OUT_ROOT, exist_ok=True)
     add_about(wb, csv_path, total, counts, per_hub)
@@ -150,7 +150,7 @@ def main():
     print(f"STEP 2 - Master_Entry built: {total} invoice(s) to enter  -> {out}")
     print(f"  from today's GRN ................ {total - counts['recovered']}")
     print(f"  from CDMS recovery .............. {counts['recovered']}")
-    print(f"  pre-filled from saved Gemini .... {g['passed']}  (+{g['review']} marked REVIEW, no cost)")
+    print(f"  pre-filled, no cost .............. {g['passed']}  (of which free text read: {g['text_read']})  (+{g['review']} marked REVIEW)")
     print(f"  not listed - already booked ..... {counts['already']}")
     print(f"  not listed - no PDF link yet .... {counts['missing']}   (on the Missing PDFs list)")
     print(f"  not listed - same wrong PDF ..... {counts['wrong']}   (on the Missing PDFs list)")

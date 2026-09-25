@@ -4,7 +4,7 @@ One lane every day. Every step prints plain counts and updates the **Missing PDF
 (`5_NetSuite_Booking\MISSING_PDFS.xlsx`, tab `Chase`). Full command reference: **README.md**.
 
 ```
- (morning: refresh CDMS_Tool\token.txt by hand - optional, see CDMS_Tool\HOW_TO_RUN.txt)
+ (CDMS token refreshes itself from refresh.txt - see CDMS_Tool\HOW_TO_RUN.txt)
 
  STEP 1  python download_hul_pdfs.py "<grn.csv>"           ─► Missing PDFs list: CDMS re-check + no-link rows
            a. CDMS check of the Missing PDFs list (only if token valid; else "SKIPPED")
@@ -15,11 +15,13 @@ One lane every day. Every step prints plain counts and updates the **Missing PDF
            → ONE Master_Entry.xlsx (pre-filled from SAVED Gemini answers - free)
            (RUN_DAY.bat "<grn.csv>" = steps 1 + 2)
 
- STEP 3  you, in Master_Entry.xlsx, row by row:
-           type amounts yourself   |  x in "No Gemini"  |  Remark = can't book (wrong file)
-         optional: python fill_tax_from_pdfs.py   (Gemini reads ONLY the untouched rows)
+ STEP 3  DEFAULT: python fill_tax_from_pdfs.py   (Gemini reads every untouched row and fills it)
            answers saved first → 5_NetSuite_Booking\Gemini\raw\<md5>.json (never paid twice)
+           text PDFs (Chrompet) are read locally first - free, 5 math checks; only scans go to Gemini
            → Master filled from those; unsure rows = red REVIEW with the printed tax shown
+           YOU then cross-check: spot-check PASS rows, properly verify every REVIEW row
+         manual override (skip Gemini for a row, or all): in Master_Entry.xlsx, row by row,
+           type amounts yourself  |  x in "No Gemini"  |  Remark = can't book (wrong file)
 
  STEP 4  python generate_master_csvs.py                    ─► Missing PDFs list: rows left out of the batch
            MONEY CHECK: stops if typed amounts ≠ printed tax on the PDF
